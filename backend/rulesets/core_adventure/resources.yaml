@@ -1,0 +1,25 @@
+# §6 Core resources. Formulas are safe expressions over attr.* / stat.* / trait.* refs.
+resources:
+  - key: resource.health
+    name: Health
+    max_formula: "10 + attr.might * 2"
+    min: -100            # Health ≤ 0 = incapacitated; further damage tracked for injury/dying/death rules
+    depletion: allow
+    visibility: owner
+    on_depleted:
+      - { type: apply_condition, params: { condition: condition.incapacitated } }
+    recovery:
+      long_rest: "floor(resource.health.max / 2)"
+  - key: resource.stamina
+    name: Stamina
+    max_formula: "5 + attr.might + attr.resolve"
+    visibility: owner
+    recovery:
+      short_rest: "floor(resource.stamina.max / 2)"
+      long_rest: "resource.stamina.max"
+  - key: resource.resolve_points
+    name: Resolve Points
+    max_formula: "3 + attr.resolve"
+    visibility: owner
+    recovery:
+      long_rest: "resource.resolve_points.max"

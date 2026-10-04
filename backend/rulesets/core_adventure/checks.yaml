@@ -1,0 +1,41 @@
+# §2, §5, §10 Check definitions. attribute/skill null = chosen per use (adjudicator pairing).
+checks:
+  - key: check.core
+    name: Core check
+    description: "1d20 + Attribute + Skill + modifiers vs Difficulty"
+    roll: 1d20
+    versus: difficulty
+    modifier_targets: [check.*]
+  - key: check.opposed
+    name: Opposed check
+    description: "both roll; higher total wins; ties favour the defender"
+    roll: 1d20
+    versus: opposed
+    tie: defender
+    modifier_targets: [check.*]
+  - key: check.melee_attack
+    name: Melee attack
+    roll: 1d20
+    attribute: attr.might
+    skill: skill.melee
+    versus: stat
+    versus_stat: stat.defense
+    tie: defender
+    modifier_targets: [check.*, check.melee_attack]
+  - key: check.ranged_attack
+    name: Ranged attack
+    roll: 1d20
+    attribute: attr.agility
+    skill: skill.ranged
+    versus: stat
+    versus_stat: stat.defense
+    tie: defender
+    modifier_targets: [check.*, check.ranged_attack]
+  - key: check.initiative
+    name: Initiative
+    roll: 1d20
+    attribute: attr.agility
+    versus: opposed
+    critical_low: null
+    critical_high: null
+    modifier_targets: [check.initiative]

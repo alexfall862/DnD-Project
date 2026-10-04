@@ -1,0 +1,43 @@
+# Core Adventure — the first, deliberately conventional ruleset (docs/specifications/core-adventure-rules.md)
+key: core_adventure
+name: Core Adventure
+version: "0.1.0"
+engine_schema_version: 1
+description: Compact, genre-flexible d20 system used to prove the generic engine.
+files:
+  - attributes.yaml
+  - skills.yaml
+  - resources.yaml
+  - stats.yaml
+  - checks.yaml
+  - conditions.yaml
+  - traits.yaml
+
+# §2 difficulty scale
+difficulty_scale:
+  routine: 8
+  easy: 11
+  moderate: 14
+  hard: 17
+  severe: 20
+  extraordinary: 23
+  extreme: 26
+
+# §2 margin = total - difficulty
+margins:
+  - { degree: critical_failure, max: -10, success: false }
+  - { degree: failure, min: -9, max: -1, success: false }
+  - { degree: success, min: 0, max: 4, success: true }
+  - { degree: strong_success, min: 5, max: 9, success: true }
+  - { degree: exceptional_success, min: 10, success: true }
+
+settings:
+  action_economy: { major: 1, movement: 1, reaction: 1 }      # §8
+  range_bands: [engaged, close, near, far, distant]            # §9
+  cover: { partial: 2, strong: 4 }                             # §9 Defense bonus; total = untargetable
+  high_ground_bonus: 1
+  rest: { short_rest_seconds: 3600, long_rest_seconds: 28800 } # §13
+  time_costs: { trivial_interaction: 10, combat_round: 6, room_search: 300 }
+  creation: { attribute_base: 3, attribute_points: 10, attribute_max: 8, skill_points: 8, skill_max: 3, traits: 2 }
+  advancement: { skill_rank_cost: "new_rank * 2", attribute_cost: "new_value * 3" }
+  lethality_modes: [heroic, standard, deadly, brutal]

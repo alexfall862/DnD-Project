@@ -1,0 +1,29 @@
+# secrets / local config
+.env
+.env.*
+!.env.example
+
+# python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# node (from Milestone 10)
+node_modules/
+.next/
+
+# spike / eval outputs that contain model text
+scripts/spike/out/
+docs/spikes/raw/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

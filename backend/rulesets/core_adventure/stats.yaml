@@ -1,0 +1,6 @@
+# §7 Derived statistics. Armour contributes via equipment modifiers (Milestone 02b);
+# heavy armour caps the Agility contribution at 5 through a `set` on stat.defense_agility.
+derived_stats:
+  - { key: stat.defense_agility, name: Defense (Agility part), formula: "attr.agility" }
+  - { key: stat.defense, name: Defense, formula: "10 + stat.defense_agility" }
+  - { key: stat.initiative, name: Initiative bonus, formula: "attr.agility" }   # §8: 1d20 + Agility

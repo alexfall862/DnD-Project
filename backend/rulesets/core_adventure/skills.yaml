@@ -1,0 +1,18 @@
+# §4 Skills: 0 untrained … 5 legendary. Default pairings; the adjudicator may re-pair.
+skills:
+  - { key: skill.athletics, name: Athletics, group: physical, default_attribute: attr.might }
+  - { key: skill.acrobatics, name: Acrobatics, group: physical, default_attribute: attr.agility }
+  - { key: skill.stealth, name: Stealth, group: physical, default_attribute: attr.agility }
+  - { key: skill.awareness, name: Awareness, group: awareness, default_attribute: attr.intellect }
+  - { key: skill.investigation, name: Investigation, group: awareness, default_attribute: attr.intellect }
+  - { key: skill.lore, name: Lore, group: knowledge, default_attribute: attr.intellect }
+  - { key: skill.technology, name: Technology, group: knowledge, default_attribute: attr.intellect }
+  - { key: skill.medicine, name: Medicine, group: knowledge, default_attribute: attr.intellect }
+  - { key: skill.survival, name: Survival, group: knowledge, default_attribute: attr.intellect }
+  - { key: skill.crafting, name: Crafting, group: knowledge, default_attribute: attr.intellect }
+  - { key: skill.persuasion, name: Persuasion, group: social, default_attribute: attr.presence }
+  - { key: skill.deception, name: Deception, group: social, default_attribute: attr.presence }
+  - { key: skill.intimidation, name: Intimidation, group: social, default_attribute: attr.presence }
+  - { key: skill.performance, name: Performance, group: social, default_attribute: attr.presence }
+  - { key: skill.melee, name: Melee, group: combat, default_attribute: attr.might }
+  - { key: skill.ranged, name: Ranged, group: combat, default_attribute: attr.agility }

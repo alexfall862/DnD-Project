@@ -1,0 +1,84 @@
+# §12 Initial conditions. Effects use registered engine primitives only.
+conditions:
+  - key: condition.burning
+    name: Burning
+    stacking: refresh
+    tags: [fire, harmful]
+    triggers:
+      - event: on_round_end
+        effects:
+          - { type: deal_damage, params: { amount: "1d4", damage_type: damage.fire, source: condition.burning } }
+    removed_by: [extinguish, water]
+  - key: condition.bleeding
+    name: Bleeding
+    stacking: intensity
+    max_intensity: 3
+    tags: [harmful, physical]
+    triggers:
+      - event: on_strenuous_action
+        effects:
+          - { type: modify_resource, params: { resource: resource.health, amount: "-condition.bleeding" } }
+    removed_by: [medicine, long_rest]
+  - key: condition.blinded
+    name: Blinded
+    tags: [sensory]
+    modifiers:
+      - { target: check.*, op: disadvantage, note: "cannot see" }
+  - key: condition.frightened
+    name: Frightened
+    tags: [mental]
+    modifiers:
+      - { target: check.*, op: subtract, value: 2, condition: "ctx.confronting_source", note: "-2 confronting the source" }
+    default_duration_seconds: 60
+  - key: condition.stunned
+    name: Stunned
+    tags: [harmful]
+    modifiers:
+      - { target: stat.defense, op: subtract, value: 2 }
+    default_duration_seconds: 6
+  - key: condition.prone
+    name: Prone
+    tags: [position]
+    modifiers:
+      - { target: check.melee_attack, op: subtract, value: 2, note: "attacking while prone" }
+      - { target: stat.defense, op: subtract, value: 2, condition: "ctx.attacker_engaged", note: "vs engaged attackers" }
+  - key: condition.restrained
+    name: Restrained
+    tags: [position]
+    modifiers:
+      - { target: stat.defense, op: subtract, value: 2 }
+      - { target: check.melee_attack, op: disadvantage }
+      - { target: check.ranged_attack, op: disadvantage }
+  - key: condition.poisoned
+    name: Poisoned
+    stacking: intensity
+    max_intensity: 3
+    tags: [harmful]
+    modifiers:
+      - { target: check.*, op: subtract, value: "condition.poisoned" }
+    triggers:
+      - event: on_round_end
+        effects:
+          - { type: deal_damage, params: { amount: "condition.poisoned", damage_type: damage.poison, source: condition.poisoned } }
+    removed_by: [medicine, long_rest]
+  - key: condition.exhausted
+    name: Exhausted
+    stacking: intensity
+    max_intensity: 3
+    tags: [fatigue]
+    modifiers:
+      - { target: check.*, op: subtract, value: "condition.exhausted" }
+      - { target: resource.stamina.max, op: subtract, value: "condition.exhausted * 2" }
+    removed_by: [long_rest]
+  - key: condition.hidden
+    name: Hidden
+    description: "not automatically targetable by observers who have not detected the actor (perspective-aware)"
+    tags: [stealth]
+    blocks_targeting: true
+  - key: condition.incapacitated
+    name: Incapacitated
+    description: "Health ≤ 0"
+    tags: [harmful, disabling]
+    modifiers:
+      - { target: stat.defense, op: subtract, value: 4 }
+    removed_by: [medicine, healing]

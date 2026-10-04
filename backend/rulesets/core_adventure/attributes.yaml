@@ -1,0 +1,7 @@
+# §3 Five attributes, 1–10, typical adult 5
+attributes:
+  - { key: attr.might, name: Might, description: "strength, force, endurance, carrying capacity" }
+  - { key: attr.agility, name: Agility, description: "coordination, reflexes, balance, precision" }
+  - { key: attr.intellect, name: Intellect, description: "reasoning, technical understanding, memory, analysis" }
+  - { key: attr.presence, name: Presence, description: "social force, charisma, deception, leadership, performance" }
+  - { key: attr.resolve, name: Resolve, description: "willpower, focus, courage, mental endurance" }

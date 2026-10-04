@@ -1,0 +1,43 @@
+# §14 Traits (subset needed by the Frostbridge builds and tests). More arrive with content.
+traits:
+  - key: trait.keen_observer
+    name: Keen Observer
+    modifiers:
+      - { target: skill.awareness, op: add, value: 1 }
+  - key: trait.frontier_veteran
+    name: Frontier Veteran
+    modifiers:
+      - { target: skill.survival, op: add, value: 1 }
+    capabilities: [cold_resistant]
+  - key: trait.guard_training
+    name: Guard Training
+    modifiers:
+      - { target: check.initiative, op: add, value: 1 }
+  - key: trait.well_connected
+    name: Well Connected
+    capabilities: [contacts]
+  - key: trait.night_vision
+    name: Night Vision
+    capabilities: [see_in_dark]
+  - key: trait.quick_reflexes
+    name: Quick Reflexes
+    modifiers:
+      - { target: stat.defense, op: add, value: 1 }
+  - key: trait.iron_will
+    name: Iron Will
+    modifiers:
+      - { target: resource.resolve_points.max, op: add, value: 2 }
+  - key: trait.veteran
+    name: Veteran
+    modifiers:
+      - { target: resource.health.max, op: add, value: 2 }
+  - key: trait.keen_smell
+    name: Keen Smell
+    capabilities: [scent_tracking]
+
+damage_types:
+  - { key: damage.physical, name: Physical }
+  - { key: damage.fire, name: Fire }
+  - { key: damage.cold, name: Cold }
+  - { key: damage.poison, name: Poison }
+  - { key: damage.mental, name: Mental }
