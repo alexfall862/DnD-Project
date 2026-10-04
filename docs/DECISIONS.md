@@ -296,10 +296,24 @@ Alex accepted longer turns so the local GLM-4.5-Air model can be used as-is (no 
 model, no cloud fallback). Consequences, recorded in `turn-budget-and-latency.md` §3–§5:
 - Time to first narration token: simple turn target 12 s / hard 20 s; complex turn 25 s / 40 s.
   Combat round 40 s / 75 s. Time to first visible output (mechanics, streamed) stays ≤ 2 s / 5 s.
-- Default visible AI reactions per turn: **1** (tunable `spotlight_visible_reactions`, 1–2).
+- Default visible AI reactions per turn: ~~1~~ **2, run concurrently** (superseded the same day by the
+  parallel re-probe below; tunable `spotlight_visible_reactions`, 1–2).
 - Per-role `max_tokens` budgets (`ai-contracts.md` §21), mandatory repair call for actor roles,
   and stable-prefix-first prompt layout (prefix caching) remain requirements.
 - Revisit if A9 gains a faster resident model; the budgets are campaign-configurable defaults.
+
+### Parallel inference re-probe (2026-10-03)
+Alex switched the A9 host to GUI-less mode (4 request slots). Measured (`HARDWARE-TARGET.md`):
+single-call speed unchanged at 22 tok/s; effective concurrency is 2 (aggregate 31.5 tok/s,
+plateau from 2 callers upward). Two concurrent calls ≈ 1.5x one call. Consequences:
+- The orchestrator runs independent reaction calls concurrently, **max in-flight inference = 2**
+  (`MAX_CONCURRENT_INFERENCE=2`); a third queues behind them.
+- Two visible reactions run in parallel: intent ~8 s + 2 parallel reactions ~16 s + narrator
+  first token ~1 s ≈ 25 s, which meets the revised complex-turn target (25 s) without dropping to
+  one reaction. The relaxed budgets stay as agreed; they are now met with margin rather than
+  needed. Default visible reactions restored to 2.
+- Worth asking Alex: whether the server runs `--parallel 4` with experts offloaded to CPU; if
+  decode is bandwidth/compute-bound by offload, more slots will not help.
 
 ### Pending
 - **2026-10-03, later:** A9 was updated after the spike. The project now serves **GLM-4.5-Air**

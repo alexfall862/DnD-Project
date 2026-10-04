@@ -49,10 +49,12 @@ Target sequence for a typical social turn:
 1. deterministic preprocessing, intent syntax (0 calls);
 2. Intent Interpreter — only when text is not an explicit structured action (1 call, fast);
 3. mechanics (0 calls); Rules Adjudicator only when no rule covers the action (0–1, balanced);
-4. reactions: eligibility + significance scoring is deterministic; **at most one** visible
-   AI reaction call per turn by default on the current hardware (`spotlight_visible_reactions`
-   tunable, default 1, may be raised to 2 for slower-paced play); other eligible reactions update
-   silently with no call, and the lowest-significance one is dropped first;
+4. reactions: eligibility + significance scoring is deterministic; **at most two** visible
+   AI reaction calls per turn by default (`spotlight_visible_reactions` tunable, 1–2). The two
+   run **concurrently** from the same scene snapshot: measured, two parallel calls cost ≈ 1.5x
+   one call (≈ 16 s for two 260-token reactions vs ≈ 24 s sequential). Effective hardware
+   concurrency is 2 (`HARDWARE-TARGET.md` re-probe); more reactions queue. Other eligible
+   reactions update silently with no call, lowest significance dropped first;
 5. Narrator (1 call, creative, **streamed**);
 6. background: Claim Extractor fallback (0–1), memory processing (0–1 at checkpoints),
    canon extractor (0–1, only when narration contained unstructured flavor), embeddings.
@@ -67,8 +69,8 @@ step on the turn record:
 
 1. drop Canon Extractor for this turn;
 2. defer memory processing to the next checkpoint;
-3. reduce visible AI reactions to 1 (lowest significance dropped; its state update
-   is done silently with no call) — a no-op when the default is already 1;
+3. reduce visible AI reactions from 2 to 1 (lowest significance dropped; its state update
+   is done silently with no call);
 4. in combat, use the actor's recorded **fallback policy** instead of a fresh AI Player call
    when the situation is unchanged (same target alive and reachable, HP above threshold);
 5. use a shorter narrator prompt ("resolve in two sentences");

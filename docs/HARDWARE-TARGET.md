@@ -69,7 +69,7 @@ never substitute). Context limit 32k tokens per request including the reply. Thi
 | Output rate | **22.5 completion tok/s** (185 tokens in 8.2 s) |
 | Prompt reading, cold | ≈ 350 tok/s (2,250 tokens → TTFT 6.4 s); A9 states ~280 tok/s |
 | **Prefix cache** | **works**: same system prompt again → TTFT 0.31 s, `cached_tokens` ≈ all. Stable content first in every prompt. |
-| Two concurrent calls | serialized (6.4 s and 12.3 s); plan for wall time = sum |
+| Two concurrent calls | ~~serialized~~ superseded by the 2026-10-03 GUI-less re-probe below |
 | `json_object` | works but GLM wraps the object in a ```json fence; parse leniently |
 | A9 prompt overhead | ~240 tokens prepended |
 | Latency model | ≈ (uncached prompt tokens / 350) + (completion tokens / 22.5) s |
@@ -78,3 +78,23 @@ Implication for `turn-budget-and-latency.md` §3: with cached role prefixes, a 2
 reply costs ≈ 11–12 s. Intent (~150 tokens, ~7 s) + two visible reactions (~23 s) + narrator
 TTFT puts a complex social turn at ≈ 30 s to first narration token — the hard cap, double the
 target. One visible reaction (degradation step 3) gives ≈ 19 s. See DECISIONS.md.
+
+## Re-probe 2026-10-03 (server switched to GUI-less mode; A9 now accepts 4 parallel requests)
+
+Same model (`ttrpg/local-general`, GLM-4.5-Air), 200-token completions, distinct prompts:
+
+| Concurrent calls | Wall time | Per-call latency (min / med / max) | Aggregate | Per-call speed |
+|---|---|---|---|---|
+| 1 | 6.9 s | 6.9 | 22.0 tok/s | 22.0 tok/s |
+| 2 | 10.8 s | 10.2 / 10.5 / 10.8 | 30.8 tok/s | 15.9 tok/s |
+| 4 | 20.2 s | 9.0 / 15.3 / 20.2 | 31.5 tok/s | 11.9 tok/s |
+| 6 | 31.8 s | 9.7 / 21.7 / 31.8 | 31.5 tok/s | 9.7 tok/s |
+
+- No 503s up to 6 callers; requests queue instead. Single-call speed is unchanged.
+- **Effective concurrency is 2, not 4**: aggregate throughput rises ~1.4x at 2 callers and
+  plateaus at ~31.5 tok/s; four callers finish in two waves of ~10 s. The extra slots add queue
+  depth, not speed (decode appears compute-bound on this setup).
+- Prefix cache still works under parallel load (3 of 4 simultaneous calls reused ~2.2k cached
+  tokens; the fourth, arriving first and cold, did not).
+- Planning rule: **two independent calls cost ≈ 1.5x one call, not 2x.** Batch independent AI
+  reactions in pairs; do not expect more than that.
