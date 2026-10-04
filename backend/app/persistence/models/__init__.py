@@ -29,6 +29,8 @@ from app.persistence.models.event import (
     TranscriptMessage,
     TranscriptRecipient,
 )
+from app.persistence.models.generation import GenerationRun, GenerationStage
+from app.persistence.models.jobs import BackgroundJob
 from app.persistence.models.knowledge import (
     Belief,
     Claim,
@@ -84,6 +86,9 @@ __all__ = [
     "DecisionTrace",
     "ModelRun",
     "TurnMetrics",
+    "BackgroundJob",
+    "GenerationRun",
+    "GenerationStage",
     "Memory",
     "MemorySource",
     "Mystery",

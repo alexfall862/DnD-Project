@@ -568,6 +568,52 @@ class SceneCaughtUp(EventPayload):
     model_calls: int = 0
 
 
+class EntityCreated(EventPayload):
+    """A non-actor, non-location, non-item entity (culture, conflict, pressure, opportunity)."""
+
+    event_type: ClassVar[str] = "entity.created"
+    entity_id: uuid.UUID
+    entity_type: str
+    name: str
+
+
+class FactionMemberJoined(EventPayload):
+    event_type: ClassVar[str] = "faction.member_joined"
+    faction_id: uuid.UUID
+    actor_id: uuid.UUID
+    role: str | None = None
+
+
+class LocationMaterialized(EventPayload):
+    """Progressive materialization (campaign-generation §27): latent → materialized."""
+
+    event_type: ClassVar[str] = "location.materialized"
+    location_id: uuid.UUID
+    from_detail: str
+    zones: int = 0
+
+
+class CampaignStarted(EventPayload):
+    event_type: ClassVar[str] = "campaign.started"
+    generation_run_id: uuid.UUID | None = None
+    opening_scene_id: uuid.UUID | None = None
+    player_actor_id: uuid.UUID | None = None
+
+
+class SimulationRunCompleted(EventPayload):
+    """One bounded world-simulation run (world-memory §23): interval, candidates, budget."""
+
+    event_type: ClassVar[str] = "simulation.run"
+    from_tick: int
+    to_tick: int
+    event_budget: int
+    candidates: list[str] = Field(default_factory=list)
+    model_calls: int = 0
+    applied: int = 0
+    rejected: int = 0
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
 class MechanicalDefinitionCreated(EventPayload):
     event_type: ClassVar[str] = "mechanical_definition.created"
     definition_id: uuid.UUID
@@ -646,6 +692,11 @@ PAYLOAD_TYPES: dict[str, type[EventPayload]] = {
         ScenesMerged,
         SceneCaughtUp,
         MechanicalDefinitionCreated,
+        SimulationRunCompleted,
+        EntityCreated,
+        FactionMemberJoined,
+        LocationMaterialized,
+        CampaignStarted,
     )
 }
 

@@ -185,7 +185,10 @@ class ContextCompiler:
                     actor_id,
                     text,
                     reason="supplied by orchestrator",
-                    public=section
+                    # an objective role's sections are engine-built (no actor's perspective
+                    # to protect); an actor-scoped role only gets the listed public ones
+                    public=not spec.actor_scoped
+                    or section
                     in (
                         "style",
                         "rules_public",

@@ -53,6 +53,21 @@ once per session; then, for each milestone, read only the `## Read` context pack
   `campaign.settings` keys `spotlight`, `narration_style`, `latency_budget`, `player_canon_policy`.
 - Live A9 turn ≈ 36–38 s (interpreter ≈ 10 s, actor 13–21 s, narrator streams within ~4 s);
   numbers and the design-iteration fixes are in `docs/tasks/milestone-06d-cli-play-harness.md`.
+- Milestone 09 landed campaign generation (`app/worldgen/`): 18 World Author stages store
+  validated envelopes; `POST /campaigns/{id}/start` builds the world in one unit of work and
+  runs the quality checks; `tests/fixtures/saltreach.py` is the FakeModel script.
+  Follow-ups: genre modules (`rulesets/core_adventure/modules/`, per campaign via
+  `RulesEngine.for_campaign`), imports, guided creation, generated §23 artifact. The full
+  pipeline runs on A9 in ≈ 50 min (`docs/spikes/worldgen-a9-2026-10-04.md`); stage notes
+  (`note:` entries) record every deterministic normalization of the model's output.
+  The heavy stages are outline-then-fill (`app/worldgen/itemized.py`): one call per item,
+  per-item retries, progress on the stage row so reruns resume; `WORLDGEN_A9_RESUME=<run id>`
+  resumes the A9 eval.
+- Milestone 08 landed `SimulationService` (one bounded run per crossed 6-hour boundary or
+  wait/rest: scheduled events → plan clocks → candidates → at most one World Simulator call →
+  `simulation.run` event), the `background_jobs` worker (`app/worker.py`), and NPC whispers.
+  Settings: `SIMULATION_GRANULARITY_SECONDS`, `SIMULATION_EVENT_BUDGET`,
+  `CATCHUP_GRANULARITY_SECONDS`, `MAX_OFFSCREEN_CATCHUPS_PER_TURN`.
 - Milestone 07 landed scene transitions (`SceneService.travel`: join/merge, live vs offscreen
   clocks), concealed items revealed by search, documents, mysteries/clues, deterministic
   scheduled events and a one-call offscreen catch-up for AI party members; the World
@@ -63,7 +78,7 @@ once per session; then, for each milestone, read only the `## Read` context pack
 
 `make db-up` · `make migrate` · `make api` · `make test` (+ `test-unit`, `test-integration`,
 `test-invariants`, `test-leakage`, `test-rules`, `test-replay`) · `make reset-db` ·
-`make seed-demo` · `make play` · `make eval-local`. See `Makefile`.
+`make seed-demo` · `make play` · `make worker ARGS="--once"` · `make eval-local`. See `Makefile`.
 
 ## Working style
 

@@ -1,0 +1,29 @@
+skills:
+  - { key: skill.arcana, name: Arcana, group: knowledge, default_attribute: attr.intellect }
+resources:
+  - key: resource.mana
+    name: Mana
+    max_formula: "3 + attr.intellect + attr.resolve"
+    visibility: owner
+    recovery:
+      long_rest: "resource.mana.max"
+traits:
+  - key: trait.arcane_gift
+    name: Arcane Gift
+    modifiers:
+      - { target: skill.arcana, op: add, value: 1 }
+    capabilities: [arcane_casting]
+equipment:
+  - key: item.staff
+    name: Staff
+    slot: weapon
+    melee: true
+    two_handed: true
+    damage: 1d6
+    attack_check: check.melee_attack
+    attribute_bonus: "floor(attr.might / 2)"
+    range_bands: { engaged: 0 }
+  - key: item.focus_crystal
+    name: Focus crystal
+    slot: gear
+    tags: [arcane, fragile]

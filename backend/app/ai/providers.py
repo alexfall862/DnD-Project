@@ -121,10 +121,25 @@ class A9Provider:
             body["stream"] = True
         return body
 
+    @staticmethod
+    def read_timeout_for(max_tokens: int, floor_s: float) -> float:
+        """Long generations need long reads: ~15 tok/s worst case plus prompt/queue headroom
+        (A9 generation run: a 4096-token World Author stage outlived a fixed 240 s timeout)."""
+        return max(floor_s, max_tokens / 15 + 60)
+
     async def _post_with_retries(self, body: dict[str, Any]) -> httpx.Response:
         not_loaded = 0
+        floor = self._client.timeout.read or 240.0
+        timeout = httpx.Timeout(
+            self.read_timeout_for(int(body.get("max_tokens") or 0), floor), connect=15.0
+        )
         for attempt in range(self.busy_retries + self.not_loaded_retries + 1):
-            r = await self._client.post("/chat/completions", json=body)
+            try:
+                r = await self._client.post("/chat/completions", json=body, timeout=timeout)
+            except httpx.TimeoutException as exc:
+                raise ProviderError(f"A9 timed out after {timeout.read:.0f} s") from exc
+            except httpx.TransportError as exc:
+                raise ProviderError(f"A9 transport error: {type(exc).__name__}: {exc}") from exc
             if r.status_code == 503:
                 if attempt >= self.busy_retries:
                     raise ModelUnavailable("A9 busy")
@@ -228,6 +243,11 @@ class FakeModelProvider:
         """Queue a response for a role; the last registered response repeats once the queue is
         exhausted, so a single registration answers every call."""
         self._by_role.setdefault(role, []).append(response)
+        return self
+
+    def replace(self, role: str, response: str | dict[str, Any] | Responder) -> FakeModelProvider:
+        """Drop whatever was registered for a role and answer with `response` from now on."""
+        self._by_role[role] = [response]
         return self
 
     def set_default(self, responder: Responder) -> None:

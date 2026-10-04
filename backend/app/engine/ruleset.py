@@ -274,6 +274,14 @@ class Ruleset:
         self.source_dir = source_dir
         self.defs: dict[str, dict[str, Definition]] = {k: {} for k in DEF_TYPES}
         self.content_hash = ""
+        self.modules: list[GenreModuleManifest] = []
+
+    @property
+    def module_keys(self) -> tuple[str, ...]:
+        return tuple(m.key for m in self.modules)
+
+    def worldgen_constraints(self) -> list[str]:
+        return [f"[{m.name}] {c}" for m in self.modules for c in m.worldgen_constraints]
 
     # -- access ---------------------------------------------------------------------------------
 
@@ -547,9 +555,61 @@ def _iter_defs(doc: Any, file: str) -> Iterator[tuple[str, dict[str, Any]]]:
             yield section, item
 
 
-def load_ruleset(path: str | Path, *, effect_types: set[str] | None = None) -> Ruleset:
-    """Load and validate a ruleset package directory. `effect_types` defaults to the engine's
-    registered primitives."""
+class GenreModuleManifest(BaseModel):
+    """A genre module (campaign-generation §4; core-adventure-rules §19): extra declarative
+    content and world-generation constraints, toggled per campaign. A module may add new
+    definitions; it may not redefine the base ruleset's."""
+
+    model_config = ConfigDict(extra="forbid")
+    key: str
+    name: str
+    description: str = ""
+    genres: list[str] = Field(default_factory=list)  # brief genres that select this module
+    conflicts: list[str] = Field(default_factory=list)
+    worldgen_constraints: list[str] = Field(default_factory=list)
+    files: list[str] = Field(default_factory=list)
+
+
+def module_dir(root: Path) -> Path:
+    return root / "modules"
+
+
+def available_modules(root: str | Path) -> dict[str, GenreModuleManifest]:
+    out: dict[str, GenreModuleManifest] = {}
+    base = module_dir(Path(root))
+    if not base.exists():
+        return out
+    for mf in sorted(base.glob("*/module.yaml")):
+        try:
+            m = GenreModuleManifest.model_validate(yaml.safe_load(mf.read_text(encoding="utf-8")))
+        except Exception as exc:  # noqa: BLE001
+            raise RulesetError(f"{mf}: invalid module manifest: {exc}") from exc
+        out[m.key] = m
+    return out
+
+
+def modules_for_genres(root: str | Path, genres: list[str]) -> list[str]:
+    """Module keys a brief's genres select, in a stable order; conflicting modules keep the
+    first selected (deliberately unusual combinations stay possible otherwise)."""
+    wanted = {g.strip().lower() for g in genres}
+    chosen: list[str] = []
+    mods = available_modules(root)
+    for key, m in mods.items():
+        if wanted & {g.lower() for g in m.genres} or key in wanted:
+            if any(c in chosen for c in m.conflicts):
+                continue
+            chosen.append(key)
+    return chosen
+
+
+def load_ruleset(
+    path: str | Path,
+    *,
+    effect_types: set[str] | None = None,
+    modules: tuple[str, ...] | list[str] = (),
+) -> Ruleset:
+    """Load and validate a ruleset package directory, plus the named genre modules.
+    `effect_types` defaults to the engine's registered primitives."""
     from app.engine.effects import REGISTRY  # local import: effects imports nothing from here
 
     root = Path(path)
@@ -578,6 +638,33 @@ def load_ruleset(path: str | Path, *, effect_types: set[str] | None = None) -> R
                 ident = item.get("key") if isinstance(item, dict) else repr(item)
                 raise RulesetError(f"{file}: invalid {section} entry {ident}: {exc}") from exc
             rs.add(section, d)
+    mods = available_modules(root) if modules else {}
+    for key in modules:
+        m = mods.get(key)
+        if m is None:
+            raise RulesetError(f"unknown genre module {key!r}")
+        clash = [c for c in m.conflicts if c in modules]
+        if clash:
+            raise RulesetError(f"genre module {key!r} conflicts with {clash}")
+        mroot = module_dir(root) / key
+        hasher.update((mroot / "module.yaml").read_bytes())
+        for file in m.files:
+            fp = mroot / file
+            if not fp.exists():
+                raise RulesetError(f"module {key!r} lists missing file {file!r}")
+            raw = fp.read_bytes()
+            hasher.update(raw)
+            doc = yaml.safe_load(raw.decode("utf-8"))
+            for section, item in _iter_defs(doc, f"{key}/{file}"):
+                try:
+                    d = DEF_TYPES[section].model_validate(item)
+                except Exception as exc:  # noqa: BLE001
+                    ident = item.get("key") if isinstance(item, dict) else repr(item)
+                    raise RulesetError(
+                        f"{key}/{file}: invalid {section} entry {ident}: {exc}"
+                    ) from exc
+                rs.add(section, d)  # duplicates (redefining base content) are refused here
+        rs.modules.append(m)
     rs.content_hash = hasher.hexdigest()
     rs.validate(effect_types if effect_types is not None else set(REGISTRY))
     return rs

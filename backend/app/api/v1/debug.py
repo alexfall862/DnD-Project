@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import campaign_engine
 from app.api.errors import DebugModeRequired, NotFound
 from app.persistence.db import get_session
 from app.persistence.models import (
@@ -329,6 +330,80 @@ async def model_run_context(
     }
 
 
+@router.post("/campaigns/{campaign_id}/advance-time", dependencies=[Depends(require_debug)])
+async def advance_time(
+    campaign_id: uuid.UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    seconds: int = Query(..., ge=1),
+    process_simulation: bool = True,
+    reason: str = "debug advance",
+) -> dict[str, Any]:
+    """api-contracts: time advance in engine seconds with a `process_simulation` flag.
+    Scheduled events fire with the clock; the simulation run is the bounded 08 tick."""
+    from app.ai.context import ContextCompiler
+    from app.ai.routing import ModelRouter
+    from app.ai.runner import ModelRunner
+    from app.services.memory import MemoryService
+    from app.services.simulation import SimulationService
+    from app.services.turns import Turn, budget_from_settings
+    from app.services.world import CampaignHandle, WorldService
+
+    c = await session.get(Campaign, campaign_id)
+    if c is None or c.active_timeline_id is None:
+        raise NotFound("campaign not found")
+    h = CampaignHandle(c.id, c.active_timeline_id)
+    world = WorldService(session)
+    from_tick = (await world.clock(h)).current_tick
+    await world.advance_time(h, seconds, reason=reason)
+    to_tick = (await world.clock(h)).current_tick
+    out: dict[str, Any] = {"from_tick": from_tick, "to_tick": to_tick}
+    if process_simulation:
+        state = request.app.state
+        memory = MemoryService(session, getattr(state, "embedder", None))
+        engine = await campaign_engine(state, session, c.id)
+        compiler = ContextCompiler(session, memory=memory, engine=engine)
+        runner = ModelRunner(session, ModelRouter(state.settings, state.provider))
+        sim = SimulationService(
+            session, state.settings, engine=engine, compiler=compiler, runner=runner
+        )
+        turn = Turn(h, budget=budget_from_settings(state.settings, c.settings))
+        run = await sim.tick(h, from_tick=from_tick, to_tick=to_tick, turn=turn)
+        await turn.finish(session)
+        await session.commit()
+        out["simulation"] = run.to_dict()
+    return out
+
+
+@router.get("/campaigns/{campaign_id}/jobs", dependencies=[Depends(require_debug)])
+async def jobs(
+    campaign_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+) -> list[dict[str, Any]]:
+    from app.persistence.models.jobs import BackgroundJob
+
+    rows = (
+        await session.execute(
+            select(BackgroundJob)
+            .where(BackgroundJob.campaign_id == campaign_id)
+            .order_by(BackgroundJob.created_at.desc())
+            .limit(100)
+        )
+    ).scalars()
+    return [
+        {
+            "id": str(j.id),
+            "job_type": j.job_type,
+            "status": j.status,
+            "attempts": j.attempts,
+            "priority": j.priority,
+            "subject_id": str(j.subject_id) if j.subject_id else None,
+            "last_error": j.last_error,
+            "result": j.result,
+        }
+        for j in rows
+    ]
+
+
 @router.post(
     "/campaigns/{campaign_id}/scenes/{scene_id}/end", dependencies=[Depends(require_debug)]
 )
@@ -351,7 +426,7 @@ async def end_scene(
     orch = SessionOrchestrator(
         session,
         state.settings,
-        engine=state.rules_engine,
+        engine=await campaign_engine(state, session, c.id),
         provider=state.provider,
         embedder=getattr(state, "embedder", None),
     )

@@ -1,0 +1,9 @@
+# core-adventure-rules §19 Fantasy: Arcana, Mana, magical items and traditions.
+key: fantasy
+name: Fantasy
+description: Learnable magic with distinct traditions; enchanted objects exist but are rare.
+genres: [heroic fantasy, dark fantasy, science fantasy, fantasy]
+files: [content.yaml]
+worldgen_constraints:
+  - Magic exists and can be learned; arcane, divine, primal and occult traditions differ in source and price.
+  - Magical items are rare and remembered; each has a maker, a history or a cost.

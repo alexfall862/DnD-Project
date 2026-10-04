@@ -12,6 +12,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.worldgen.envelope import WorldAuthorOut
+
 Stance = Literal["asserts_true", "asserts_false", "uncertain", "question", "hypothetical"]
 Fidelity = Literal["full", "partial", "distorted"]
 BeliefType = Literal[
@@ -120,6 +122,8 @@ class NPCActorOut(Lenient):
     decision_summary: str = Field(min_length=1, max_length=600)
     speech_act: SpeechActOut = Field(default_factory=SpeechActOut)
     spoken_text: str | None = None
+    speech_channel: Literal["say", "whisper", "none"] = "say"  # whisper needs a target
+    speech_target_ref: str | None = None
     conveys: list[ConveysItemOut] = Field(default_factory=list)
     intentions: list[IntentionOut] = Field(default_factory=list)
     belief_proposals: list[BeliefProposalOut] = Field(default_factory=list)
@@ -212,6 +216,30 @@ class BeliefProcessorOut(Lenient):
 
 class CanonExtractorOut(Lenient):
     candidates: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SimulationProposalOut(Lenient):
+    """One meaningful offscreen decision (ai-contracts §14). `subject_ref` is a candidate ref
+    from the request; the engine validates and applies it, or rejects it."""
+
+    subject_ref: str = Field(min_length=1)
+    type: Literal["plan_advance", "plan_hold", "plan_abandon", "actor_travel", "proceed", "cancel"]
+    target_ref: str | None = None  # actor_travel: a location ref
+    delay_seconds: int | None = Field(default=None, ge=0)
+    justification: str = ""
+
+
+class WorldSimulatorOut(Lenient):
+    proposals: list[SimulationProposalOut] = Field(default_factory=list)
+    budget_used: int = Field(default=0, ge=0)
+
+
+class BriefInterviewOut(Lenient):
+    """Guided creation (campaign-generation §2): settings inferred from one answer."""
+
+    brief_patch: dict[str, Any] = Field(default_factory=dict)
+    next_question: str | None = None
+    done: bool = False
 
 
 class JournalWriterOut(Lenient):
@@ -433,11 +461,24 @@ ROLES: dict[str, RoleSpec] = {
             frozenset(),
         ),
         RoleSpec(
+            "brief_interviewer",
+            "fast_structured",
+            "brief_interviewer",
+            BriefInterviewOut,
+            350,
+            0.5,
+            False,
+            frozenset({"brief", "conversation", "task"}),
+            frozenset(),
+            frozenset({"campaign_brief"}),
+            notes="pre-play only; proposes brief fields, never world content",
+        ),
+        RoleSpec(
             "world_author",
             "deep_world_author",
             "world_author",
-            None,
-            1200,
+            WorldAuthorOut,
+            4096,
             0.7,
             False,
             frozenset({"brief", "established_canon", "latent_canon", "task", "rules_public"}),
@@ -449,8 +490,8 @@ ROLES: dict[str, RoleSpec] = {
             "world_simulator",
             "balanced_reasoning",
             "world_simulator",
-            None,
-            1200,
+            WorldSimulatorOut,
+            600,
             0.5,
             False,
             frozenset(

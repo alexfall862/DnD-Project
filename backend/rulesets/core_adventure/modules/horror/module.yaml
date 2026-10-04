@@ -1,0 +1,9 @@
+# core-adventure-rules §19 Horror: Stability, fear, Occult, stronger hidden-information pressure.
+key: horror
+name: Horror
+description: The unknown is dangerous to know; minds fray before bodies do.
+genres: [cosmic horror, weird fiction, horror, dark fantasy]
+files: [content.yaml]
+worldgen_constraints:
+  - Keep hidden information scarce and costly; some truths should stay only partly knowable.
+  - Threats are revealed through traces and witnesses long before they are seen.

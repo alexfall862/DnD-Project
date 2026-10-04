@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import campaign_engine
 from app.api.errors import ApiError, UnauthorizedPerspectiveError
 from app.persistence.db import get_session
 from app.services.orchestrator import (
@@ -73,7 +74,7 @@ async def _handle(
     orch = SessionOrchestrator(
         session,
         state.settings,
-        engine=state.rules_engine,
+        engine=await campaign_engine(state, session, campaign_id),
         provider=state.provider,
         embedder=getattr(state, "embedder", None),
     )

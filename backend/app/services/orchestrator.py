@@ -51,6 +51,7 @@ from app.services.ai_actors import AIActorService, Happenings
 from app.services.candidates import Candidate, build_candidates, candidates_text, slug
 from app.services.documents import DocumentService
 from app.services.events import EventTransaction
+from app.services.jobs import JobQueue
 from app.services.memory import MemoryService
 from app.services.memory_processing import MemoryProcessingService
 from app.services.narration import NarrationService
@@ -58,6 +59,7 @@ from app.services.observations import ObservationService
 from app.services.perspective import PerspectiveService, UnauthorizedPerspective
 from app.services.player_canon import DEFAULT_POLICY, PlayerCanonService
 from app.services.scenes import SceneService
+from app.services.simulation import SimulationService
 from app.services.speech import ConveysItem, LeakageError, SpeechService
 from app.services.turns import Turn, budget_from_settings
 from app.services.vocab import ACTION_MAP, FREE_TYPES, READ_TYPES, SPEECH_TYPES
@@ -157,6 +159,7 @@ class SessionOrchestrator:
         self.scenes = SceneService(session)
         self.documents = DocumentService(session)
         self.memory = MemoryService(session, embedder)
+        self.jobs = JobQueue(session)
         self.compiler = ContextCompiler(session, memory=self.memory, engine=engine)
         self.runner = ModelRunner(session, ModelRouter(settings, provider))
         self.ai = AIActorService(
@@ -170,6 +173,9 @@ class SessionOrchestrator:
             scenes=self.scenes,
         )
         self.narration = NarrationService(session, compiler=self.compiler, runner=self.runner)
+        self.simulation = SimulationService(
+            session, settings, engine=engine, compiler=self.compiler, runner=self.runner
+        )
         self.memory_processing = MemoryProcessingService(
             session, compiler=self.compiler, runner=self.runner, memory=self.memory
         )
@@ -236,6 +242,7 @@ class SessionOrchestrator:
             raise StaleState(campaign.world_version if campaign else 0, scene.version)
         seq_start = await self._last_sequence(h)
         hp_before = await self._resources(req.actor_id)
+        tick_start = (await self.world.clock(h)).current_tick
 
         # 1–2: raw text, channel prefix, pending clarification
         text, channel = self._parse_prefix(req.text, req.channel)
@@ -434,6 +441,16 @@ class SessionOrchestrator:
 
         # 13b: offscreen scenes catch up (bounded), without anything reaching the human
         await self._catch_up_offscreen(h, turn, result)
+
+        # 13c: the world moves when enough time passed, or when the player waited/rested
+        # (time-accounting §6; orchestration §25): one bounded simulation run
+        tick_now = (await self.world.clock(h)).current_tick
+        if tick_now > tick_start and (
+            self.simulation.crosses_boundary(tick_start, tick_now)
+            or last_action in ("action.wait", "action.short_rest", "action.long_rest")
+        ):
+            run = await self.simulation.tick(h, from_tick=tick_start, to_tick=tick_now, turn=turn)
+            turn.extra["simulation"] = run.to_dict()
 
         # 14: bundle the turn as the focus actor perceived it
         await self.session.flush()
@@ -650,13 +667,36 @@ class SessionOrchestrator:
                     break
         defer = turn.degraded("defer_memory_processing")
         results = []
+        created = 0
         for a in await self.ai.ai_participants(scene):
             r = await self.memory_processing.checkpoint(
                 h, a.id, reason=reason, turn=turn, scene=fresh, defer=defer
             )
             results.append(r.__dict__ | {"actor_id": str(r.actor_id)})
+            created += r.memories_created
+            if r.deferred:
+                # the worker finishes what the turn budget could not (orchestration §37)
+                await self.jobs.enqueue(
+                    "memory.process",
+                    campaign_id=h.campaign_id,
+                    timeline_id=h.timeline_id,
+                    subject_id=a.id,
+                    payload={"scene_id": str(scene.id), "reason": reason},
+                )
         if not defer:
             await self.memory_processing.write_journal(h, req.actor_id, turn=turn, scene=fresh)
+        elif any(r.get("deferred") for r in results):
+            await self.jobs.enqueue(
+                "journal.update",
+                campaign_id=h.campaign_id,
+                timeline_id=h.timeline_id,
+                subject_id=req.actor_id,
+                payload={"scene_id": str(scene.id), "entry_type": "scene"},
+            )
+        if created and self.memory.embedder is not None:
+            await self.jobs.enqueue(
+                "memory.embedding", campaign_id=h.campaign_id, timeline_id=h.timeline_id
+            )
         turn.extra["checkpoints"] = results
 
     async def end_scene(

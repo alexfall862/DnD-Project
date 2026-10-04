@@ -145,6 +145,7 @@ class WorldService:
         importance_tier: str = "standard",
         properties: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
+        simulation_state: dict[str, Any] | None = None,
     ) -> Location:
         async with self._tx(h) as tx:
             entity = Entity(
@@ -162,6 +163,7 @@ class WorldService:
                 location_type=location_type,
                 detail_level=detail_level,
                 properties=properties or {},
+                simulation_state=simulation_state or {},
             )
             self.session.add(location)
             await self.session.flush()
@@ -704,6 +706,86 @@ class WorldService:
             )
         ).scalars()
         return any(c == "human" for c in rows)
+
+    # -- generic entities, materialization --------------------------------------------------------
+
+    async def create_entity(
+        self,
+        h: CampaignHandle,
+        entity_type: str,
+        name: str,
+        *,
+        importance_tier: str = "standard",
+        metadata: dict[str, Any] | None = None,
+    ) -> Entity:
+        """Entities that are neither actors, locations nor items (cultures, conflicts,
+        pressures, opportunities): identity + metadata, nothing mechanical."""
+        async with self._tx(h) as tx:
+            entity = Entity(
+                campaign_id=h.campaign_id,
+                entity_type=entity_type,
+                canonical_name=name,
+                importance_tier=importance_tier,
+                metadata_=metadata or {},
+            )
+            self.session.add(entity)
+            await self.session.flush()
+            event = await tx.emit(
+                ev.EntityCreated(entity_id=entity.id, entity_type=entity_type, name=name),
+                entities=[(entity.id, "subject")],
+            )
+            entity.created_event_id = event.id
+        return entity
+
+    async def materialize_location(
+        self,
+        h: CampaignHandle,
+        location_id: uuid.UUID,
+        *,
+        space: dict[str, Any],
+        features: list[dict[str, Any]],
+        entry_zone: str | None = None,
+    ) -> Location:
+        """Give an outline/latent location a playable space (campaign-generation §27). Existing
+        established features are kept; new ones are added as latent canon."""
+        async with self._tx(h) as tx:
+            loc = await self._get(Location, location_id, what="location")
+            before = loc.detail_level
+            if before == "materialized":
+                raise WorldError("location is already materialized")
+            props = dict(loc.properties or {})
+            props["space"] = space
+            props["features"] = list(props.get("features", [])) + list(features)
+            if entry_zone:
+                props["entry_zone"] = entry_zone
+            event = await tx.emit(
+                ev.LocationMaterialized(
+                    location_id=loc.id, from_detail=before, zones=len(space.get("zones", []))
+                ),
+                location_id=loc.id,
+                entities=[(loc.entity_id, "subject")],
+            )
+            loc.properties = props
+            loc.detail_level = "materialized"
+            ent = await self._get(Entity, loc.entity_id, what="entity")
+            ent.metadata_ = {**(ent.metadata_ or {}), "materialized_event_id": str(event.id)}
+        return loc
+
+    async def add_faction_member(
+        self, h: CampaignHandle, faction_id: uuid.UUID, actor_id: uuid.UUID, role: str | None = None
+    ) -> FactionMembership:
+        async with self._tx(h) as tx:
+            actor = await self._get(Actor, actor_id, what="actor")
+            await self._get(Faction, faction_id, what="faction")
+            event = await tx.emit(
+                ev.FactionMemberJoined(faction_id=faction_id, actor_id=actor_id, role=role),
+                entities=[(actor.entity_id, "subject")],
+            )
+            row = FactionMembership(
+                faction_id=faction_id, actor_id=actor_id, role=role, joined_event_id=event.id
+            )
+            self.session.add(row)
+        return row
 
     # -- factions and parties ------------------------------------------------------------------
 

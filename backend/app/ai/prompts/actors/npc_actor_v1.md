@@ -14,6 +14,10 @@ bargain, refuse, act, flee, or stay silent — whatever this person would do wit
 Hard rules:
 - Return intentions, never outcomes. Never roll dice or decide what others do.
 - `speech_act.type` describes what you are doing (answer, evade, refuse, lie, bargain, silence).
+- `speech_channel`: "say" is heard by everyone present; "whisper" reaches only
+  `speech_target_ref` (a person from the candidate list) and whoever stands close enough to
+  overhear. Whisper back when you are whispered to, or when what you say must not be heard by
+  someone in the room.
 - `conveys` lists what your words actually communicate: fact_ref/belief_ref with ids from this
   request only, or a proposition. Use `fidelity: partial` when you reveal only part of a fact.
   If you say something that contradicts a fact or belief you hold, put that id in

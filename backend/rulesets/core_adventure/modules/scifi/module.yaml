@@ -1,0 +1,8 @@
+# core-adventure-rules §19 Sci-Fi: Piloting, Hacking, energy weapons, cybernetics.
+key: scifi
+name: Sci-Fi
+description: Machines, salvage and networks are part of ordinary life.
+genres: [science fantasy, space opera, cyberpunk, post-apocalyptic, sci-fi]
+files: [content.yaml]
+worldgen_constraints:
+  - Respect the brief's technology ceiling; machines need power, parts and people who can fix them.

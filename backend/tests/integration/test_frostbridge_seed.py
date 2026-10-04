@@ -66,6 +66,7 @@ async def test_seed_builds_verifies_and_matches_the_leakage_matrix(
         "day2_market",
         "day3_log_draft",
         "day3_plan",
+        "day5_renn_to_dock",
         "day5_shipment",
         "day8_quarry",
     }
@@ -123,3 +124,58 @@ def test_fixed_artifact_respects_the_constraints() -> None:
         )
     with pytest.raises(SeedError):
         validate_artifact({"key": "x", "tier": "epic", "passive": {"type": "modify_check"}})
+
+
+async def test_the_artifact_slot_uses_the_world_author_and_falls_back_safely(
+    session: AsyncSession,
+) -> None:
+    from app.ai.providers import FakeModelProvider
+    from app.persistence.models import MechanicalDefinition
+
+    good = {
+        "mechanics": [
+            {
+                "key": "anything",
+                "name": "Rimewatch Compass",
+                "tier": "low",
+                "description": "A compass whose needle frosts over when danger is near.",
+                "passive": {
+                    "type": "modify_check",
+                    "params": {"check": "check.*", "op": "add", "amount": 1, "when": "danger"},
+                },
+            }
+        ]
+    }
+    fake = (
+        FakeModelProvider()
+        .register("world_author", {"mechanics": []})
+        .register("world_author", good)
+    )
+    w = await seed_frostbridge(
+        session, name="seed-artifact", engine_version="test", artifact_provider=fake
+    )
+    await session.commit()
+    assert w.artifact_source == "world_author" and len(fake.calls) == 2  # one corrective retry
+    row = (
+        await session.execute(
+            select(MechanicalDefinition).where(MechanicalDefinition.campaign_id == w.h.campaign_id)
+        )
+    ).scalar_one()
+    assert row.source_kind == "world_author" and row.definition["name"] == "Rimewatch Compass"
+    assert row.definition_key == "item.frostglass_shard"  # the slot keeps its key
+    item = await session.get(Item, w.items["artifact"])
+    assert item.public_properties["description"].startswith("A compass")
+    # a model that keeps proposing a forbidden effect gets the fixed artifact instead
+    bad = {
+        "mechanics": [{"key": "x", "name": "Gate", "tier": "low", "passive": {"type": "teleport"}}]
+    }
+    fake2 = FakeModelProvider().register("world_author", bad)
+    w2 = await seed_frostbridge(
+        session, name="seed-artifact-bad", engine_version="test", artifact_provider=fake2
+    )
+    assert w2.artifact_source == "fixture" and w2.artifact_errors
+    assert (
+        (await session.get(Item, w2.items["artifact"]))
+        .public_properties["description"]
+        .startswith("A thumb-sized shard")
+    )

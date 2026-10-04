@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.deps import actor_engine
 from app.api.errors import NotFound, UnauthorizedPerspectiveError
 from app.persistence.db import get_session
 from app.services.memory_processing import MemoryProcessingService
@@ -55,7 +56,7 @@ async def _focus(session: AsyncSession, actor_id: uuid.UUID) -> CampaignHandle:
     return CampaignHandle(campaign.id, campaign.active_timeline_id)
 
 
-def _svc(request: Request, session: AsyncSession) -> MemoryProcessingService:
+def _svc(request: Request, session: AsyncSession, engine=None) -> MemoryProcessingService:
     from app.ai.context import ContextCompiler
     from app.ai.routing import ModelRouter
     from app.ai.runner import ModelRunner
@@ -65,7 +66,7 @@ def _svc(request: Request, session: AsyncSession) -> MemoryProcessingService:
     memory = MemoryService(session, getattr(state, "embedder", None))
     return MemoryProcessingService(
         session,
-        compiler=ContextCompiler(session, memory=memory, engine=state.rules_engine),
+        compiler=ContextCompiler(session, memory=memory, engine=engine or state.rules_engine),
         runner=ModelRunner(session, ModelRouter(state.settings, state.provider)),
         memory=memory,
     )
@@ -76,7 +77,9 @@ async def journal(
     actor_id: uuid.UUID, request: Request, session: AsyncSession = Depends(get_session)
 ):
     await _focus(session, actor_id)
-    rows = await _svc(request, session).journal(actor_id)
+    rows = await _svc(
+        request, session, await actor_engine(request.app.state, session, actor_id)
+    ).journal(actor_id)
     return [
         JournalEntryOut(
             id=r.id,
@@ -99,7 +102,9 @@ async def encyclopedia(
     category: str | None = Query(default=None),
 ):
     h = await _focus(session, actor_id)
-    rows = await _svc(request, session).rebuild_encyclopedia(h, actor_id)
+    rows = await _svc(
+        request, session, await actor_engine(request.app.state, session, actor_id)
+    ).rebuild_encyclopedia(h, actor_id)
     await session.commit()
     return [
         EncyclopediaOut(
@@ -122,7 +127,9 @@ async def encyclopedia_entry(
     session: AsyncSession = Depends(get_session),
 ):
     h = await _focus(session, actor_id)
-    rows = await _svc(request, session).rebuild_encyclopedia(h, actor_id)
+    rows = await _svc(
+        request, session, await actor_engine(request.app.state, session, actor_id)
+    ).rebuild_encyclopedia(h, actor_id)
     await session.commit()
     for r in rows:
         if r.entity_id == entity_id:

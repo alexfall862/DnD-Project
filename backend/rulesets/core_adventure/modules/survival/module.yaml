@@ -1,0 +1,9 @@
+# core-adventure-rules §19 Survival: hunger, fatigue, exposure, travel resources.
+key: survival
+name: Survival
+description: Food, water, warmth and rest are real costs of every journey.
+genres: [survival, post-apocalyptic]
+files: [content.yaml]
+worldgen_constraints:
+  - Supplies are scarce; settlements trade in food, water, fuel and shelter.
+  - Travel between places costs supplies and time; the wilds are dangerous to cross unprepared.

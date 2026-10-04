@@ -46,8 +46,8 @@ dev: db-up migrate api ## Start db, migrate, run api
 web: ## (Milestone 10) frontend dev server
 	@echo "frontend is deferred to Milestone 10 (see frontend/README.md)"
 
-worker: ## (Milestone 08) background worker
-	@echo "worker lands in Milestone 08"
+worker: ## Background worker (jobs: embeddings, memory processing, journals, simulation): make worker ARGS="--once"
+	$(RUN) python -m app.worker $(ARGS)
 
 test: ## Run the full backend suite (needs db-up)
 	$(RUN) pytest

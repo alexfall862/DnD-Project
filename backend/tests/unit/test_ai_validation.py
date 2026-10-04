@@ -117,3 +117,31 @@ def test_intent_and_npc_schemas_accept_spike_shaped_output():
     }
     m, _, errs = validate_output(json.dumps(npc), NPCActorOut)
     assert m is not None and m.speech_act.type == "evade", errs
+
+
+def test_a_cut_off_answer_is_repaired_in_the_role_s_own_shape() -> None:
+    """A9 generation runs: the actor-specific truncation instruction turned a World Author
+    stage into an NPC speech. Only actor roles get it."""
+    from app.ai.runner import TRUNCATED_GENERIC, TRUNCATED_INSTRUCTION, truncated_instruction
+
+    assert truncated_instruction("npc_actor") == TRUNCATED_INSTRUCTION
+    assert truncated_instruction("ai_player") == TRUNCATED_INSTRUCTION
+    for role in ("world_author", "world_simulator", "brief_interviewer", "memory_processor"):
+        text = truncated_instruction(role)
+        assert text == TRUNCATED_GENERIC and "spoken_text" not in text and "conveys" not in text
+
+
+def test_a_cut_off_list_keeps_its_complete_items() -> None:
+    from app.ai.validation import salvage_truncated_json
+
+    cut = (
+        '```json\n{"summary": "x", "actors": [{"ref": "a", "name": "A"}, {"ref": "b", '
+        '"name": "B", "goals": [{"description": "q"}]}, {"ref": "c", "name": "C, the \\"tall'
+    )
+    fixed = salvage_truncated_json(cut)
+    data = json.loads(fixed)
+    assert [a["ref"] for a in data["actors"]] == ["a", "b"]  # c was incomplete: dropped
+    nested = '{"actors": [{"ref": "a"}, {"ref": "b", "goals": [{"d": "x"}, {"d": "y"}], "na'
+    assert [a["ref"] for a in json.loads(salvage_truncated_json(nested))["actors"]] == ["a"]
+    assert salvage_truncated_json('{"a": 1}') == '{"a": 1}'
+    assert salvage_truncated_json("no json here") is None

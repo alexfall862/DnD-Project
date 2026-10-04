@@ -24,7 +24,7 @@ from app.ai.context import CompiledContext
 from app.ai.prompts import PromptRepository
 from app.ai.providers import ModelRequest, ModelResponse, ProviderError
 from app.ai.routing import ModelRouter
-from app.ai.validation import validate_output
+from app.ai.validation import salvage_truncated_json, validate_output
 from app.persistence.models import DecisionTrace, ModelRun
 from app.services.world import CampaignHandle
 
@@ -36,12 +36,36 @@ TRUNCATED_INSTRUCTION = (
     "answer: decision_summary under 25 words, spoken_text under 40 words, at most 2 conveys "
     "items and 1 intention. Return the complete JSON object only."
 )
+# The instruction above is written for the actor roles; any other role must be asked for a
+# shorter answer in ITS shape (first A9 generation runs: a cut-off World Author stage was told
+# to write "spoken_text" and "conveys", and dutifully returned an NPC's speech).
+ACTOR_ROLES = {"ai_player", "npc_actor", "npc_tactical"}
+# Roles whose output is lists of independent items: a cut-off answer keeps its complete items
+# (never actor speech, where a truncated sentence could change its meaning)
+SALVAGE_ROLES = {"world_author", "world_simulator", "memory_processor"}
+
+
+def _looks_cut(text: str) -> bool:
+    t = text.strip().removesuffix("```").strip()
+    return t.count("{") > t.count("}")
+
+
+TRUNCATED_GENERIC = (
+    "Your previous output was cut off before the JSON ended. Respond again with a shorter but "
+    "complete JSON object in exactly the same shape and with the same top-level fields: keep "
+    "the required content, use short strings, and leave out optional detail. Return the JSON "
+    "object only."
+)
+
+
+def truncated_instruction(role: str) -> str:
+    return TRUNCATED_INSTRUCTION if role in ACTOR_ROLES else TRUNCATED_GENERIC
 
 
 @dataclass
 class RunResult:
     model_run_id: uuid.UUID
-    status: str  # ok | repaired | invalid | failed
+    status: str  # ok | repaired | salvaged | invalid | failed
     output: BaseModel | None
     text: str
     structured: dict[str, Any] | None = None
@@ -56,7 +80,7 @@ class RunResult:
 
     @property
     def ok(self) -> bool:
-        return self.status in ("ok", "repaired")
+        return self.status in ("ok", "repaired", "salvaged")
 
 
 @dataclass
@@ -180,11 +204,24 @@ class ModelRunner:
             output, structured, errors = validate_output(
                 text, ctx.role.output_model, belief_ids=ctx.belief_refs, fact_ids=ctx.fact_refs
             )
+            truncated = resp.finish_reason == "length" or _looks_cut(text)
+            if output is None and truncated and ctx.role.name in SALVAGE_ROLES:
+                fixed = salvage_truncated_json(text)
+                if fixed is not None:
+                    output, structured, errors2 = validate_output(
+                        fixed,
+                        ctx.role.output_model,
+                        belief_ids=ctx.belief_refs,
+                        fact_ids=ctx.fact_refs,
+                    )
+                    if output is not None:
+                        errors = ["salvaged: output was cut off; incomplete tail dropped"]
+                        text = fixed
             if output is None and ctx.role.repair:
                 calls += 1
                 truncated = resp.finish_reason == "length"
                 instruction = (
-                    TRUNCATED_INSTRUCTION
+                    truncated_instruction(ctx.role.name)
                     if truncated
                     else REPAIR_INSTRUCTION.format(errors="\n- ".join(errors))
                 )
@@ -210,7 +247,11 @@ class ModelRunner:
                     text = text2
                     errors = errors2 if output is not None else errors + errors2
         status = (
-            "ok"
+            "salvaged"
+            if output is not None
+            and calls == 1
+            and errors[:1] == ["salvaged: output was cut off; incomplete tail dropped"]
+            else "ok"
             if (output is not None and calls == 1) or (ctx.role.output_model is None)
             else "repaired"
             if output is not None

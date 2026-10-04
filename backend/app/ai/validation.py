@@ -97,3 +97,55 @@ def validate_output(
         return model.model_validate(obj), obj, []
     except ValidationError as exc:
         return None, obj, errors_of(exc)
+
+
+def _boundary(stack: list[str]) -> bool:
+    """A cut is safe only between the elements of a top-level list (actors, facts, ...) or
+    between top-level fields — never inside an item, which would keep it half-written."""
+    return len(stack) == 1 or (len(stack) == 2 and stack[-1] == "]")
+
+
+def salvage_truncated_json(text: str) -> str | None:
+    """A cut-off JSON object closed at the last *complete* value: every item that was fully
+    written is kept, the incomplete tail is dropped, nothing is invented. Returns the repaired
+    text or None. Used only for list-shaped roles (A9 generation runs: the NPC stage overran its
+    output budget and the repair turn timed out on the server)."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    body = text[start:]
+    stack: list[str] = []
+    in_str = esc = False
+    last_good: tuple[int, list[str]] | None = None
+    for i, ch in enumerate(body):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack:
+                return None
+            stack.pop()
+            if not stack:
+                return body[: i + 1]  # it was complete after all
+            if _boundary(stack):
+                last_good = (i + 1, list(stack))
+        elif ch == "," and _boundary(stack):
+            last_good = (i, list(stack))
+    if last_good is None:
+        return None
+    cut, open_ = last_good
+    candidate = body[:cut].rstrip().rstrip(",") + "".join(reversed(open_))
+    try:
+        json.loads(candidate)
+    except ValueError:
+        return None
+    return candidate

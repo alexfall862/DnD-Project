@@ -31,6 +31,7 @@ from app.services.events import EventTransaction
 from app.services.world import CampaignHandle, WorldError
 
 DETERMINISTIC_TYPES = {"fact.establish", "clue.destroy", "plan.advance", "location.state"}
+SIMULATED_TYPES = {"actor.travel"}  # handled by SimulationService (scene transitions)
 BLOCKING_CONDITIONS = {"condition.incapacitated", "condition.detained", "condition.dead"}
 
 
@@ -239,7 +240,12 @@ class ScheduleService:
             if plan is not None and plan.status == "active":
                 steps = list(plan.steps or [])
                 before = plan.current_step
-                after = min(before + 1, len(steps))
+                # `step` names the step this event completes (earlier steps count as done);
+                # without it the current step completes
+                done = int(p["step"]) if p.get("step") is not None else before
+                if done < before:
+                    return  # already past it
+                after = min(done + 1, len(steps))
                 adv = await tx.emit(
                     ev.PlanAdvanced(
                         plan_id=plan.id,

@@ -3,6 +3,7 @@ triggers together, plus deterministic state hashing for replay tests."""
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 from pathlib import Path
@@ -18,6 +19,12 @@ from app.engine.triggers import TriggerEngine
 RULESETS_DIR = Path(__file__).resolve().parents[2] / "rulesets"
 
 
+@functools.lru_cache(maxsize=32)
+def _cached_ruleset(ruleset_key: str, modules: tuple[str, ...]) -> Ruleset:
+    """Parsed rulesets are read-only after loading; parse each combination once."""
+    return load_ruleset(RULESETS_DIR / ruleset_key, modules=modules)
+
+
 class RulesEngine:
     def __init__(self, ruleset: Ruleset, dice: DiceService | None = None) -> None:
         self.ruleset = ruleset
@@ -26,9 +33,23 @@ class RulesEngine:
         self.triggers = TriggerEngine(ruleset)
 
     @classmethod
-    def load(cls, ruleset_key: str, *, master_seed: int | None = None) -> RulesEngine:
-        rs = load_ruleset(RULESETS_DIR / ruleset_key)
+    def load(
+        cls,
+        ruleset_key: str,
+        *,
+        master_seed: int | None = None,
+        modules: tuple[str, ...] | list[str] = (),
+    ) -> RulesEngine:
+        rs = _cached_ruleset(ruleset_key, tuple(modules))
         return cls(rs, DiceService(SeedStream(master_seed)))
+
+    @classmethod
+    def for_campaign(
+        cls, ruleset_key: str, settings: dict[str, Any] | None, *, master_seed: int | None = None
+    ) -> RulesEngine:
+        """The campaign's ruleset: the base plus the genre modules recorded at generation."""
+        mods = tuple((settings or {}).get("genre_modules") or ())
+        return cls.load(ruleset_key, master_seed=master_seed, modules=mods)
 
     # -- state ---------------------------------------------------------------------------------
 

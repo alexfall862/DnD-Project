@@ -146,3 +146,31 @@ async def test_a9_streams_sse_deltas():
     p = A9Provider("http://a9.test/v1", "t", transport=_transport(handler))
     assert "".join([d async for d in p.stream(req(json_mode=False))]) == "The rain."
     await p.aclose()
+
+
+async def test_transport_errors_become_provider_errors_and_reads_scale_with_budget() -> None:
+    import httpx
+
+    from app.ai.providers import A9Provider, ModelRequest, ProviderError
+
+    def boom(request):
+        raise httpx.ReadTimeout("slow", request=request)
+
+    p = A9Provider("http://a9/v1", "t", transport=httpx.MockTransport(boom))
+    req = ModelRequest(
+        run_id=__import__("uuid").uuid4(),
+        profile="deep_world_author",
+        model="ttrpg/local-general",
+        system="s",
+        user="u",
+        max_tokens=4096,
+    )
+    try:
+        await p.generate(req)
+        raise AssertionError("expected ProviderError")
+    except ProviderError as exc:
+        assert "timed out" in str(exc)
+    finally:
+        await p.aclose()
+    assert A9Provider.read_timeout_for(4096, 240.0) > 300
+    assert A9Provider.read_timeout_for(400, 240.0) == 240.0

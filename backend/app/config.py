@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     narrator_enabled: bool = True  # stream the Narrator after mechanics (06c)
     max_concurrent_inference: int = Field(default=2, ge=1)
 
+    # world simulation (Milestone 08): a run per crossed boundary, bounded event budget
+    simulation_granularity_seconds: int = Field(default=6 * 3600, ge=60)
+    simulation_event_budget: int = Field(default=3, ge=1)
+    catchup_granularity_seconds: int = Field(default=600, ge=60)
+    max_offscreen_catchups_per_turn: int = Field(default=2, ge=0)
+
     @property
     def inference_configured(self) -> bool:
         return bool(self.a9_token)

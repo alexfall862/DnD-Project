@@ -301,31 +301,45 @@ class SceneService:
                     local_tick=tx.clock.current_tick,
                     state={},
                 )
+                # people already here and in no scene (residents, a shopkeeper) are part of
+                # the scene that starts when someone arrives
+                residents = await self._residents(to_location_id, {a.id for a in actors})
                 if space:
                     positions = dict(space.get("positions", {}))
                     entry = self._entry_zone(space, dest)
+                    zone_keys = [z["key"] for z in space.get("zones", [])]
                     for a in actors:
                         positions.setdefault(
                             str(a.id),
                             {"zone": entry, "engaged_with": [], "cover": "none", "elevated": False},
                         )
+                    for r in residents:
+                        home = (r.mechanical_profile or {}).get("home_zone")
+                        zone = (
+                            home if home in zone_keys else (zone_keys[-1] if zone_keys else entry)
+                        )
+                        positions.setdefault(
+                            str(r.id),
+                            {"zone": zone, "engaged_with": [], "cover": "none", "elevated": False},
+                        )
                     target.state = {"space": {**space, "positions": positions}}
                 self.session.add(target)
                 await self.session.flush()
+                everyone = [*actors, *residents]
                 started = await tx.emit(
                     ev.SceneStarted(
                         scene_id=target.id,
                         location_id=to_location_id,
                         scene_type=scene_type,
-                        participant_actor_ids=[a.id for a in actors],
+                        participant_actor_ids=[a.id for a in everyone],
                     ),
                     scene=target,
                     location_id=to_location_id,
                     cause=first,
-                    entities=[(a.entity_id, "participant") for a in actors],
+                    entities=[(a.entity_id, "participant") for a in everyone],
                 )
                 target.start_event_id = started.id
-                for a in actors:
+                for a in everyone:
                     self.session.add(
                         SceneParticipant(
                             scene_id=target.id, actor_id=a.id, joined_event_id=started.id
@@ -345,6 +359,30 @@ class SceneService:
             ended,
             caught_up_from,
         )
+
+    async def _residents(self, location_id: uuid.UUID, exclude: set[uuid.UUID]) -> list[Actor]:
+        rows = (
+            (
+                await self.session.execute(
+                    select(Actor).where(
+                        Actor.current_location_id == location_id,
+                        Actor.current_scene_id.is_(None),
+                        Actor.alive.is_(True),
+                        Actor.active.is_(True),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        out = []
+        for a in rows:
+            if a.id in exclude:
+                continue
+            if await self.perspective.controller_type(a.id) in (None, "dormant"):
+                continue
+            out.append(a)
+        return out
 
     @staticmethod
     def _entry_zone(space: dict[str, Any], dest: Location) -> str | None:

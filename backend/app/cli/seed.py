@@ -17,7 +17,7 @@ from app.config import get_settings
 from app.persistence.db import make_engine, make_session_factory
 
 
-async def run(fixture: str, name: str | None, quiet: bool) -> int:
+async def run(fixture: str, name: str | None, quiet: bool, generate_artifact: bool = False) -> int:
     settings = get_settings()
     engine = make_engine(settings.database_url)
     try:
@@ -33,8 +33,17 @@ async def run(fixture: str, name: str | None, quiet: bool) -> int:
             else:
                 from app.seeds.frostbridge import seed_frostbridge
 
+                provider = None
+                if generate_artifact:
+                    from app.worker import build_provider
+
+                    provider, _embedder = build_provider(settings)
                 w = await seed_frostbridge(
-                    session, name=name or "frostbridge", engine_version=settings.engine_version
+                    session,
+                    name=name or "frostbridge",
+                    engine_version=settings.engine_version,
+                    artifact_provider=provider,
+                    settings=settings,
                 )
             await session.commit()
             summary = w.summary()
@@ -52,8 +61,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--fixture", choices=("frostbridge", "tavern"), default="frostbridge")
     ap.add_argument("--name", default=None)
     ap.add_argument("--quiet", action="store_true", help="print only the campaign id")
+    ap.add_argument(
+        "--generate-artifact",
+        action="store_true",
+        help="ask the World Author for the §23 artifact (needs A9_TOKEN; falls back to fixed)",
+    )
     args = ap.parse_args(argv)
-    return asyncio.run(run(args.fixture, args.name, args.quiet))
+    return asyncio.run(run(args.fixture, args.name, args.quiet, args.generate_artifact))
 
 
 if __name__ == "__main__":

@@ -462,6 +462,180 @@ Milestone 11 (stress) with per-actor partitioning or iterative index scans if ne
   aloud (everyone present hears it). Adding `speech_channel` to `NPCActorOut` is a contract
   change for the design-iteration backlog.
 
+### World simulation (08) — implementation decisions (2026-10-04)
+
+- **A simulation run is an Event, not a table.** `SimulationService.tick(from_tick, to_tick)`
+  records `simulation.run` with interval, candidates, event budget, model calls and what was
+  applied/rejected (Invariant 14 made auditable). No `simulation_runs` table in v0.1.
+- **Order inside a run is fixed:** deterministic scheduled events still pending → due
+  `actor.travel` (through `SceneService.travel`, so arrivals are observed and scenes merge) →
+  plan clocks → candidate selection with prerequisite revalidation (a failing prerequisite
+  cancels deterministically, no model call) → at most ONE World Simulator call → the record.
+- **Plan steps may carry a clock.** A step is a string (no clock; advanced only by events) or
+  `{title, at_tick, kind, prerequisites}`. `kind: deterministic` steps advance when due and
+  their prerequisites hold; `kind: decision` steps and non-deterministic scheduled events (e.g.
+  `faction.shipment_departure`) are the simulator's candidates. A scheduled event may carry
+  `on_proceed` (a deterministic handler spec) so "the barge leaves" becomes a Fact when the
+  simulator lets it happen, and `plan_id` so the plan advances with it.
+- **The simulator proposes only against the candidate map.** `WorldSimulatorOut.proposals`
+  reference `s1`/`p1`/`l1` refs from the request; unknown subjects, wrong proposal types and
+  anything over the event budget are rejected and listed on the run. `plan_hold` reschedules
+  (default one day); `cancel`/`plan_abandon` end it with an event.
+- **Triggers:** a live turn whose clock advance crosses `simulation_granularity_seconds`
+  (default 6 h) or ends with wait/rest; the debug `POST /campaigns/{id}/advance-time`
+  (`process_simulation`); the `simulation.advance` worker job. An idle world costs zero calls.
+- **`actor.travel` is simulated, not clock-fired.** Travel needs scene transitions (their own
+  EventTransactions), which cannot nest inside the clock's transaction; the simulation runs it
+  after the clock. Milestone 07's `_advance_clock` hook therefore fires only the pure-data
+  types (facts, clues, plan steps, location state).
+- **Background queue = `background_jobs` + `FOR UPDATE SKIP LOCKED`.** Claim and work use
+  separate sessions; a failing handler rolls back its own session, the job records the error
+  and retries with backoff (5 s, 30 s, 2 min, 10 min) until `max_attempts`, then stays failed.
+  Jobs are optional work only: memory.embedding, memory.process (deferred checkpoints),
+  journal.update, simulation.advance; `world.materialize` is registered but raises until 09.
+  The orchestrator enqueues what the degradation ladder deferred instead of dropping it.
+- **Catch-up stays bounded (07 form).** The §4 "plan step completes within delta" trigger for
+  offscreen AI PCs is still represented by "an AI party member is in the scene"; NPC scenes
+  advance through plan clocks and scheduled events, which is what §4 step 2 asks for.
+- **NPC speech has a channel (08-0).** `NPCActorOut.speech_channel` / `speech_target_ref`;
+  whispers reach the target and legitimate overhearers only. Developers see the channel on
+  the model run's structured output (`/debug/model-runs/{id}/context`).
+- **Objective roles' supplied sections are public.** The context compiler's strict mode had
+  treated the simulator's engine-built sections (interval, candidates, plans, budget) as
+  unauthorized because only a fixed list of section names counted as public; for a
+  non-actor-scoped role every supplied section is engine data.
+
+### Campaign generation (09) — implementation decisions (2026-10-04)
+
+- **Stage outputs are proposals; the world is built once, at start.** Each stage stores its
+  validated `WorldAuthorOut` envelope on `generation_stages.output`. Nothing touches world
+  tables until `POST /campaigns/{id}/start`, which merges every envelope and builds the world
+  in one unit of work through the ordinary services (every row commits with its Event), runs
+  the §25 quality checks, emits `campaign.started` and activates the campaign — or rolls the
+  whole build back and leaves a generating draft. This is what makes pre-play rerolls and
+  dependency invalidation cheap: replacing an output never has to retract an Event.
+- **18 stages, one bounded call each, at most one corrective retry.** The pipeline follows
+  campaign-generation §5 with two adjustments: mysteries are stated *truth first* in the
+  `secrets` stage (truth facts, participants as minimal actors, timeline, red herrings) and
+  their clues are attached in `opportunities`, once places and objects exist; political
+  structures are factions of `kind: polity`. A rejected answer is retried once with the exact
+  validation errors in the task; a second rejection fails the stage and the run.
+- **Refs are the model's, ids are the engine's.** The World Author invents short refs
+  (`loc_*`, `npc_*`); validation resolves every ref against the accepted stages; the builder
+  maps refs to ids and stores `gen_ref` on each entity so later materialization can find them.
+- **Latent actors may be refined.** A later stage may repeat an earlier actor's ref to fill
+  empty fields (the secrets stage names the poisoner, the NPC stage gives him a desk and a
+  sheet); a differing non-empty value is a contradiction and rejects the stage.
+- **Contradiction rules (structural, not semantic):** a new fact about the same subject/object
+  whose predicate is the negation (`not X` vs `X`) of an established fact or a mystery truth,
+  or the same predicate with a different value, is rejected. Metaphysics facts are forced to
+  `established`. This catches the contradictions the engine can state precisely; semantic
+  near-contradictions remain a real-model evaluation concern.
+- **Depth policy is enforced per stage** (`max_detail`): world stages produce outlines,
+  the region latent places, only the settlement stage materialized places with zones; player
+  characters only in the party stage, under the Core Adventure creation budget (attributes
+  3–8 summing to ≤ 25, skill ranks ≤ 3 summing to ≤ 10, ≤ 2 traits).
+- **Knowledge is assigned, never inferred.** A generated fact is held only by the actors in
+  its `known_by_refs` or whose `knows_fact_keys` name it; identity knowledge comes from
+  `knows_refs` and the actor's own place hierarchy. The quality check refuses a world in
+  which a party member starts holding a secret or a mystery truth.
+- **Residents join new scenes.** `SceneService.travel` now includes actors already at the
+  destination and in no scene (an innkeeper, a warden) when it starts a scene there.
+- **Progressive materialization (§27)** is `MaterializeService.materialize_location`
+  (`world.materialize` job): the World Author repeats the target ref as a materialized place
+  with zones plus what it needs; the same validator runs against the campaign's established
+  canon (read back from the database); `location.materialized` records the change.
+- **Generation API** lives in the normal API (api-contracts §6) plus `POST /campaigns` to
+  create a draft. Runs execute as a `campaign.generate` job, or inline with `?inline=true`
+  for development and tests. Preview hides secrets unless debug mode and `include_secrets`.
+- **Deferred at first, built in 09b** (below): guided creation, imports, genre-module ruleset
+  content and real-model runs of the stage prompts.
+
+### Campaign generation follow-ups (09b) — implementation decisions (2026-10-04)
+
+- **Genre modules are declarative ruleset packages** (`rulesets/core_adventure/modules/<key>/`:
+  `module.yaml` + content files in the ordinary sections). Four exist: fantasy (Arcana, Mana,
+  Arcane Gift, staff, focus crystal), horror (Occult, Stability, Shaken, Stalwart), survival
+  (Hungry, rations, waterskin, bedroll), sci-fi (Piloting, Hacking, Cybernetic Eye, energy
+  pistol, scrap rifle). A module may only *add* definitions — redefining base content is a
+  load error — and carries world-generation constraints that every stage is told. The brief's
+  genres select modules once, at `create_run`, recorded as `campaign.settings.genre_modules`;
+  from then on validation, building, play (`/play`, debug, journal) and worker jobs use
+  `RulesEngine.for_campaign(...)`. Parsed rulesets are cached per module combination.
+- **Imports are an `import` stage (order −1), established canon.** Structured JSON shaped like
+  `WorldAuthorOut` is validated without a model; text/Markdown is read in paragraph-preserving
+  chunks of ≤ 6 000 characters, at most 8 (a longer source is refused with a message, never
+  silently truncated), one World Author extraction call per chunk plus one corrective retry,
+  each chunk seeing the refs of the earlier ones. The source text is placed in the task as
+  data. Imported content counts toward stage minimums, imported character sheets count toward
+  the party (the party stage completes them), and a new generation run carries the latest
+  successful import forward. An import is replaced by importing again, never "regenerated".
+  PDFs, images and maps are not read: their text must be extracted first.
+- **Guided creation is a bounded interview** (`brief_interviewer`, fast profile, ≤ 8 answers):
+  each answer → one call → a *patch* applied field by field to `CampaignBrief`; unknown fields,
+  invalid values and protected fields (`seed`) are refused and reported, so a confused answer
+  cannot corrupt the brief. An unusable reply keeps the brief and the question. "done" ends it
+  without a call. The conversation state lives in `generation_brief._guided`.
+- **Item effects have a contract stricter than "registered primitive".** The first A9 run
+  produced an artifact whose effects were `reveal_information` and `create_entity` with
+  invented parameters and `{template}` placeholders — structurally valid, meaningless in play.
+  Generated item mechanics now use only item-safe primitives (`modify_check`,
+  `modify_resource`, `restore_resource`, `deal_damage`, `apply_condition`, `remove_condition`,
+  `grant_capability`) with exactly the parameters each one reads, low-tier bounds (checks
+  ±3, dice up to 1d8/2d4) and no placeholders; the contract is spelled out in the stage task.
+  The Frostbridge fixed artifact was corrected to the parameter names `modify_check` reads.
+- **Frostbridge §23 is generated when a provider is given** (`seed_frostbridge(...,
+  artifact_provider=...)`, `make seed-demo ARGS="--generate-artifact"`): one bounded call
+  before the seed's unit of work opens (no transaction waits on a model), one corrective
+  retry, and the fixed definition as the fallback.
+- **Strict structure, normalized links, salvaged length** (the real-model runs,
+  `docs/spikes/worldgen-a9-2026-10-04.md`). Stage validation fails only on what defines the
+  world: homes, object placement, clue objects, mystery truths, the opening place, player
+  legality, contradictions of established canon or a locked truth. Links and quantities are
+  normalized deterministically and recorded as `note:` entries on the stage row: dangling soft
+  references dropped, NPC numbers clamped, 0..10 scales rescaled, repeats dropped (the earlier
+  version stands), depth clamped, latent people/places/factions refined by ref (people may be
+  revised before play; imported ones may not; places only deepen), player sheets fitted to the
+  creation budget. No normalization widens knowledge or invents content.
+- **Truncation is salvaged, then continued.** For list-shaped roles (`world_author`,
+  `world_simulator`, `memory_processor`) a cut-off answer keeps every complete top-level item
+  (never a half-written one) and the stage's bounded second call is a *continuation* told what
+  exists and asked only for what is missing. Actor roles never salvage speech.
+- **Bug fixed (06b):** the runner's truncation repair instruction was written for actor roles
+  ("spoken_text", "conveys") and was sent to every role; a cut-off World Author stage answered
+  with an NPC speech. The instruction is now role-specific. World Author output budget
+  2400 → 4096 tokens.
+- **Provider:** transport errors (timeouts, dropped connections) become `ProviderError` so a
+  failed call is a recorded failed run, never an escaped exception; the read timeout scales
+  with `max_tokens` (≈ 15 tok/s worst case + 60 s).
+
+### Itemized generation stages (09c) — implementation decisions (2026-10-04)
+
+- **The five heavy stages are outline-then-fill** (`app/worldgen/itemized.py`; `Itemized` in
+  `stages.py`): secrets, starting settlement, NPCs, opportunities and party. One small call
+  lists the stage's items (ref plus a line each); one call per item writes it in full, seeing
+  the outline and the items already finished. Why: on GLM-4.5-Air these stages wrote 3–6k
+  tokens in one answer, overran the output budget, and one bad entry cost the whole stage.
+- **The retry boundary is one item.** Each item has its own bound (one call plus one
+  corrective retry, told its own errors) and is validated with `scope="item"` (no stage
+  minimums or party composition; outline refs resolve as siblings). Good items are kept when
+  another fails. The outline is checked up front: range trimmed, repeats dropped, foreign
+  refs refused, party composition required.
+- **The merged stage is validated once more as a whole.** An error naming an item sends that
+  item back; a shortfall in another section ("needs at least 2 clues") goes to the items with
+  none of it; one repair round, then the stage fails with the unfinished items recorded. Only
+  a shortfall of the items themselves discards the outline.
+- **Progress is persisted** on `generation_stages.progress` (migration 0015) and committed
+  after every item, so a rerun (or a crashed worker) resumes at the first unfinished item.
+  Rerolls and dependent invalidation clear it; acceptance clears it.
+- `attempts` on an itemized stage counts its calls. Plain stages keep salvage plus
+  continuation for cut-off answers. The A9 eval resumes a run with `WORLDGEN_A9_RESUME=<run id>`.
+- **The first itemized A9 run found five fixes** (`docs/spikes/worldgen-a9-2026-10-04.md`).
+  The no-zones error names legal places. Budget fitting drops untrained skills, and player
+  skills out of range are fitted, not rejected. The per-member party rules run per sheet.
+  Generated schedules never land before the current clock, so day 0 means "as play
+  begins". The settlement reachability check follows routes and containment transitively.
+
 ### Pending
 - **2026-10-03, later:** A9 was updated after the spike. The project now serves **GLM-4.5-Air**
   as `ttrpg/local-general` (explicit model name; A9 never substitutes; 409 = not loaded, wait

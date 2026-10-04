@@ -1,0 +1,25 @@
+skills:
+  - { key: skill.piloting, name: Piloting, group: physical, default_attribute: attr.agility }
+  - { key: skill.hacking, name: Hacking, group: knowledge, default_attribute: attr.intellect }
+traits:
+  - key: trait.cybernetic_eye
+    name: Cybernetic Eye
+    modifiers:
+      - { target: skill.awareness, op: add, value: 1 }
+    capabilities: ["sense:vision", "sense:hearing", night_vision]
+equipment:
+  - key: item.energy_pistol
+    name: Energy pistol
+    slot: weapon
+    melee: false
+    damage: 1d10
+    attack_check: check.ranged_attack
+    range_bands: { engaged: -2, close: 0, near: 0, far: -4, distant: null }
+  - key: item.scrap_rifle
+    name: Scrap rifle
+    slot: weapon
+    melee: false
+    two_handed: true
+    damage: 1d10
+    attack_check: check.ranged_attack
+    range_bands: { engaged: null, close: 0, near: 0, far: 0, distant: -2 }

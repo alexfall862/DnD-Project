@@ -1,0 +1,20 @@
+conditions:
+  - key: condition.hungry
+    name: Hungry
+    tags: [physical]
+    modifiers:
+      - { target: check.*, op: subtract, value: 1, note: "-1 while hungry" }
+    removed_by: [eat]
+equipment:
+  - key: item.rations
+    name: Rations
+    slot: gear
+    tags: [food, consumable]
+  - key: item.waterskin
+    name: Waterskin
+    slot: gear
+    tags: [water]
+  - key: item.bedroll
+    name: Bedroll
+    slot: gear
+    tags: [shelter]

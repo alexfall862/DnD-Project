@@ -1,0 +1,22 @@
+skills:
+  - { key: skill.occult, name: Occult, group: knowledge, default_attribute: attr.intellect }
+resources:
+  - key: resource.stability
+    name: Stability
+    max_formula: "5 + attr.resolve * 2"
+    visibility: owner
+    on_depleted:
+      - { type: apply_condition, params: { condition: condition.shaken } }
+    recovery:
+      long_rest: "floor(resource.stability.max / 4)"
+conditions:
+  - key: condition.shaken
+    name: Shaken
+    tags: [mental]
+    modifiers:
+      - { target: check.*, op: subtract, value: 1, note: "-1 while shaken" }
+    removed_by: [long_rest]
+traits:
+  - key: trait.stalwart
+    name: Stalwart
+    capabilities: [fear_resistant]

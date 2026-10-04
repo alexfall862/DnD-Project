@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain import events as ev
 from app.engine.beliefs import Proposition
 from app.engine.core import RulesEngine
-from app.engine.effects import REGISTRY
 from app.persistence.models import (
     Actor,
     ActorController,
@@ -380,7 +379,7 @@ FIXED_ARTIFACT = {
     ),
     "passive": {
         "type": "modify_check",
-        "params": {"target": "check.*", "value": 1, "when": "darkness", "skill": "skill.awareness"},
+        "params": {"check": "check.*", "op": "add", "amount": 1, "when": "darkness"},
     },
     "activated": {
         "type": "apply_condition",
@@ -413,6 +412,9 @@ class FrostbridgeWorld:
     plan: uuid.UUID | None = None
     scene: uuid.UUID | None = None
     known_by: dict[str, set[str]] = field(default_factory=dict)  # fact key -> actor names
+    artifact: dict[str, Any] = field(default_factory=dict)
+    artifact_source: str = "fixture"  # fixture | world_author
+    artifact_errors: list[str] = field(default_factory=list)
 
     # compatibility with the tavern `SeededWorld` shape used by shared helpers
     @property
@@ -446,7 +448,12 @@ class FrostbridgeWorld:
 
 
 async def seed_frostbridge(
-    session: AsyncSession, *, name: str = "frostbridge", engine_version: str = "dev"
+    session: AsyncSession,
+    *,
+    name: str = "frostbridge",
+    engine_version: str = "dev",
+    artifact_provider=None,
+    settings=None,
 ) -> FrostbridgeWorld:
     """Build the whole fixture, verify it (§40) and return the symbolic map. On any failure the
     campaign is deleted again (cascade) and the error re-raised: no half-seeded worlds."""
@@ -463,6 +470,29 @@ async def seed_frostbridge(
         },
     )
     w = FrostbridgeWorld(h, world, KnowledgeService(session))
+    # §23: with a provider, the artifact is generated (one bounded call + one retry) before the
+    # unit of work opens, so no database transaction waits on a model; FIXED_ARTIFACT is both
+    # the fixture-mode answer and the fallback when generation fails validation.
+    w.artifact = dict(FIXED_ARTIFACT)
+    w.artifact_source = "fixture"
+    if artifact_provider is not None:
+        from app.config import get_settings
+        from app.worldgen.artifact import generate_artifact
+
+        definition, errors = await generate_artifact(
+            session,
+            h,
+            provider=artifact_provider,
+            settings=settings or get_settings(),
+            theme="a relic of the Long Frost, the century-long winter that ended twenty years ago",
+            key=FIXED_ARTIFACT["key"],
+        )
+        await session.commit()
+        if definition is not None:
+            w.artifact = {**definition, "description": definition.get("description") or ""}
+            w.artifact_source = "world_author"
+        else:
+            w.artifact_errors = errors
     try:
         async with unit_of_work(session):
             await _build(session, w)
@@ -767,16 +797,21 @@ async def _build(session: AsyncSession, w: FrostbridgeWorld) -> None:
         goal_type="faction",
         priority=90,
     )
+    renn_free_prereq = {"kind": "actor_free", "actor_id": str(w.actors["Renn"])}
     w.plan = (
         await psy.create_plan(
             h,
             compact_goal.id,
             [
-                "assemble cargo",
-                "destroy documentation linking Renn",
-                "load barge",
-                "depart at night",
-                "pay external buyer",
+                {"title": "assemble cargo", "at_tick": 2 * DAY + 12 * HOUR},
+                {"title": "destroy documentation linking Renn"},  # the Day +3 scheduled event
+                {
+                    "title": "load barge",
+                    "at_tick": 5 * DAY + 18 * HOUR,
+                    "prerequisites": [renn_free_prereq],
+                },
+                {"title": "depart at night", "kind": "decision", "at_tick": 5 * DAY + 23 * HOUR},
+                {"title": "pay external buyer", "at_tick": 6 * DAY + 12 * HOUR},
             ],
             current_step=0,
         )
@@ -909,6 +944,13 @@ async def _build(session: AsyncSession, w: FrostbridgeWorld) -> None:
         "plans a barge departure on the fifth night",
         subject="Renn",
         known_by=("Renn",),
+    )
+    await fact(
+        "shipment_departed",
+        "a barge of restricted salvage left Frostbridge on the fifth night",
+        sensitivity="private",
+        known_by=(),
+        canon_status="latent",
     )
     await fact(
         "dagger_harms_spirits",
@@ -1223,17 +1265,17 @@ async def _build(session: AsyncSession, w: FrostbridgeWorld) -> None:
     ).id
 
     # -- §23 generated artifact slot (fixture mode: fixed, validated definition)
-    await _store_artifact(session, w, FIXED_ARTIFACT)
+    await _store_artifact(session, w, w.artifact)
     w.items["artifact"] = (
         await world.create_item(
             h,
-            FIXED_ARTIFACT["name"],
+            w.artifact["name"],
             template_key="item.travel_supplies",
             possessor_actor_id=w.actors["Elara"],
             equipped=False,
             item_type="artifact",
-            public_properties={"description": FIXED_ARTIFACT["description"]},
-            hidden_properties={"definition_key": FIXED_ARTIFACT["key"]},
+            public_properties={"description": w.artifact.get("description", "")},
+            hidden_properties={"definition_key": w.artifact["key"]},
         )
     ).id
 
@@ -1348,9 +1390,26 @@ async def _build(session: AsyncSession, w: FrostbridgeWorld) -> None:
             h,
             tick=3 * DAY + 2 * HOUR,
             event_type="plan.advance",
-            payload={"plan_id": str(w.plan), "reason": "documentation linking Renn destroyed"},
+            payload={
+                "plan_id": str(w.plan),
+                "step": 1,
+                "reason": "documentation linking Renn destroyed",
+            },
             prerequisites=renn_free,
             key="day3_plan",
+        )
+    ).id
+    w.scheduled["day5_renn_to_dock"] = (
+        await sched.schedule(
+            h,
+            tick=5 * DAY + 22 * HOUR,
+            event_type="actor.travel",
+            payload={
+                "actor_id": str(w.actors["Renn"]),
+                "location_id": str(W["restricted_dock"]),
+            },
+            prerequisites=renn_free,
+            key="day5_renn_to_dock",
         )
     ).id
     w.scheduled["day5_shipment"] = (
@@ -1358,7 +1417,16 @@ async def _build(session: AsyncSession, w: FrostbridgeWorld) -> None:
             h,
             tick=5 * DAY + 23 * HOUR,
             event_type="faction.shipment_departure",
-            payload={"faction_id": str(w.faction), "plan_id": str(w.plan)},
+            payload={
+                "faction_id": str(w.faction),
+                "plan_id": str(w.plan),
+                "question": "The River Compact barge is loaded; does it depart tonight?",
+                "on_proceed": {
+                    "type": "fact.establish",
+                    "fact_id": str(w.facts["shipment_departed"]),
+                    "reason": "the shipment left",
+                },
+            },
             prerequisites=renn_free
             + [{"kind": "fact_true", "fact_id": str(w.facts["next_shipment_day5"])}],
             key="day5_shipment",
@@ -1529,22 +1597,14 @@ async def _item_entity(session: AsyncSession, item_id: uuid.UUID) -> uuid.UUID:
 
 
 def validate_artifact(definition: dict[str, Any]) -> None:
-    """§23 constraints: at most one passive and one activated effect, registered primitives
-    only, nothing forbidden. Structural validity, not balance."""
-    effects = [definition.get("passive"), definition.get("activated")]
-    effects = [e for e in effects if e]
-    if not effects or len(effects) > 2:
-        problems = "artifact needs one or two effects"
-        raise SeedError(problems)
-    for e in effects:
-        t = e.get("type")
-        if t in FORBIDDEN_ARTIFACT_PRIMITIVES or t not in REGISTRY:
-            raise SeedError(f"artifact effect {t!r} is forbidden or unregistered")
-        params = e.get("params") or {}
-        if t == "modify_attribute" or params.get("permanent"):
-            raise SeedError("permanent attribute increases are forbidden")
-    if definition.get("tier") not in ("low", "minor"):
-        raise SeedError("artifact must be low tier")
+    """§23 constraints, shared with generated campaigns (`worldgen.validate.mechanic_errors`):
+    at most one passive and one activated effect, registered primitives only, nothing
+    forbidden, low tier. Structural validity, not balance."""
+    from app.worldgen.validate import mechanic_errors
+
+    errors = mechanic_errors(definition, RulesEngine.load("core_adventure").ruleset)
+    if errors:
+        raise SeedError("; ".join(errors))
 
 
 async def _store_artifact(
@@ -1561,8 +1621,8 @@ async def _store_artifact(
             campaign_id=w.h.campaign_id,
             definition_key=definition["key"],
             definition_type="item",
-            source_kind="fixture",
-            source_ref="frostbridge §23 fixed artifact",
+            source_kind=w.artifact_source,
+            source_ref="frostbridge §23 artifact slot",
             definition=payload,
             content_hash=content_hash,
             power={"tier": definition["tier"]},
@@ -1574,7 +1634,7 @@ async def _store_artifact(
                 definition_id=row.id,
                 definition_key=definition["key"],
                 definition_type="item",
-                source_kind="fixture",
+                source_kind=w.artifact_source,
             )
         )
         row.created_event_id = event.id

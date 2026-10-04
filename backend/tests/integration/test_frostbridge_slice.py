@@ -895,14 +895,17 @@ async def test_frostbridge_vertical_slice(
             *(await sched.pending(w.h)),
         ]
     }
-    assert set(status) == {"day5_shipment", "day8_quarry"}  # still pending for the simulator
+    # still pending: the simulator's work (Day +5 travel and departure) and the Day +8 clock
+    assert set(status) == {"day5_renn_to_dock", "day5_shipment", "day8_quarry"}
     caravan = await session.get(Fact, w.facts["caravan_arrival"])
     assert caravan.canon_status == "established"
     draft = await session.get(Clue, w.clues["log_draft"])
     assert draft.state == "destroyed"
     assert (await session.get(Item, w.items["log_draft"])).destroyed_event_id is not None
     plan = await session.get(Plan, w.plan)
-    assert plan.current_step == 1 and plan.status == "active"
+    # the Day +3 scheduled event completes step 1 (documentation), which counts the earlier
+    # cargo step as done; later steps belong to the simulation run (08), not a bare advance
+    assert plan.current_step == 2 and plan.status == "active"
     rr = await MysteryService(session).routes_remaining(w.mystery)
     assert rr.solvable and rr.intact_by_fact[w.facts["guard_log_gap"]] == 1
     fired = (
@@ -938,7 +941,7 @@ async def test_frostbridge_vertical_slice(
             assert await has_fact_belief(s2, A, w.facts["ledger_shows_discrepancies"])
             assert not await has_predicate(s2, T, "involved in the disappearance")
             assert (await s2.get(Clue, w.clues["log_draft"])).state == "destroyed"
-            assert (await s2.get(Plan, w.plan)).current_step == 1
+            assert (await s2.get(Plan, w.plan)).current_step == 2
             goals = await psv2.repo.goals(E)
             assert any("Joren" in g.description for g in goals)
             mems = (await s2.execute(select(Memory).where(Memory.actor_id == E))).scalars().all()
@@ -1019,7 +1022,7 @@ async def test_scheduled_evidence_destruction_is_cancelled_when_renn_is_detained
     await session.commit()
     draft = await session.get(Clue, w.clues["log_draft"])
     assert draft.state == "intact"
-    assert (await session.get(Plan, w.plan)).current_step == 0
+    assert (await session.get(Plan, w.plan)).current_step == 0  # no simulation run happened
     fired = {
         e.payload["scheduled_type"]: e.payload["outcome"]
         for e in (
