@@ -69,7 +69,9 @@ async def test_world_lifecycle_and_reload(
         reloaded_scene = await s2.get(Scene, scene_id)
         assert reloaded_scene is not None
         assert reloaded_scene.version >= 2  # participant left + clock follow-ups
-        assert reloaded_scene.local_tick == 720  # live scene follows the clock
+        # the human left: the gate scene is offscreen and lags the clock until a reunion
+        # fast-forwards it (time-accounting §3–§5, Milestone 07)
+        assert reloaded_scene.local_tick < clock.current_tick
 
         parts = (
             (

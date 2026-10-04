@@ -212,6 +212,12 @@ class PerspectiveService:
             return f"{who} says something in a language you do not understand."
         if kind == "spoke":
             return f"You {'whisper' if raw.get('channel') == 'whisper' else 'say'} something."
+        if kind == "read_document":
+            return f'You read {raw.get("name") or "a document"}: "{raw.get("text", "")}"'
+        if kind == "arrived":
+            who = raw.get("who", "someone")
+            verb = "arrive" if who == "you" else "arrives"
+            return f"{who.capitalize()} {verb} at {raw.get('location') or 'a place'}."
         return kind
 
     async def entity_view(self, actor_id: uuid.UUID, entity_id: uuid.UUID) -> dict[str, Any] | None:

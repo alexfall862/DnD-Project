@@ -337,7 +337,7 @@ class PerspectiveRepository:
                 Item.public_properties,
             )
             .join(Entity, Entity.id == Item.entity_id)
-            .where(Item.possessor_entity_id == entity_id)
+            .where(Item.possessor_entity_id == entity_id, Item.destroyed_event_id.is_(None))
         )
         return [
             KnownItem(

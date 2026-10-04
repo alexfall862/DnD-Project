@@ -16,7 +16,7 @@ Nothing here reads prose and nothing here is perspective-filtered: this is objec
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import select
@@ -45,6 +45,7 @@ from app.persistence.models import (
     Event,
     Item,
     ItemHistory,
+    Observation,
     ReactionWindowRecord,
     ResolutionTraceRecord,
     ResourceStateRow,
@@ -74,6 +75,7 @@ class LoadedScene:
     items: dict[str, Item]  # item key (uuid str) -> row
     resources: dict[tuple[uuid.UUID, str], ResourceStateRow]
     conditions: dict[tuple[uuid.UUID, str], ConditionInstanceRow]
+    revealed: list[Item] = field(default_factory=list)  # concealed items found by this action
 
 
 class ActionService:
@@ -153,7 +155,13 @@ class ActionService:
             ):
                 conditions[(c.target_entity_id, c.instance_key)] = c
         held = (
-            (await s.execute(select(Item).where(Item.possessor_entity_id.in_(entity_ids))))
+            (
+                await s.execute(
+                    select(Item).where(
+                        Item.possessor_entity_id.in_(entity_ids), Item.destroyed_event_id.is_(None)
+                    )
+                )
+            )
             .scalars()
             .all()
             if entity_ids
@@ -163,7 +171,10 @@ class ActionService:
             (
                 await s.execute(
                     select(Item).where(
-                        Item.location_id == scene.location_id, Item.possessor_entity_id.is_(None)
+                        Item.location_id == scene.location_id,
+                        Item.possessor_entity_id.is_(None),
+                        Item.concealed.is_(False),
+                        Item.destroyed_event_id.is_(None),
                     )
                 )
             )
@@ -264,8 +275,55 @@ class ActionService:
         outcome = ActionResolver(loaded.ctx).resolve(request)
         if outcome.status == "invalid":
             return outcome  # nothing was written; the read transaction stays open for the caller
+        if request.action_key == "action.search" and outcome.status == "succeeded":
+            await self._reveal_concealed(loaded, outcome, request)
         await self._commit(h, loaded, outcome, request, turn_id)
         return outcome
+
+    async def _reveal_concealed(
+        self, loaded: LoadedScene, outcome: ActionOutcome, request: ActionRequest
+    ) -> None:
+        """A successful search of a zone uncovers the concealed items lying there whose
+        concealment difficulty the check total meets (rules-engine §22: the item becomes
+        visible; its hidden mechanics stay hidden). Observations and clue discoveries follow in
+        `_commit` from the `item.revealed` events."""
+        zone = request.target or loaded.ctx.space.position(request.actor).zone
+        if loaded.scene.location_id is None:
+            return
+        rows = (
+            (
+                await self.session.execute(
+                    select(Item).where(
+                        Item.location_id == loaded.scene.location_id,
+                        Item.zone_key == zone,
+                        Item.concealed.is_(True),
+                        Item.destroyed_event_id.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not rows:
+            return
+        total = outcome.check.total if outcome.check else None
+        scale = self.engine.ruleset.manifest.difficulty_scale
+        for row in rows:
+            need = row.mechanical_snapshot.get("concealment_difficulty")
+            if need is not None and total is not None and total < int(scale.get(need, need)):
+                continue
+            ent = await self.session.get(Entity, row.entity_id)
+            name = (ent.canonical_name if ent else None) or row.template_key or "something"
+            outcome.events.append(
+                {
+                    "type": "item.revealed",
+                    "actor": request.actor,
+                    "item": str(row.id),
+                    "zone": zone,
+                    "name": name,
+                }
+            )
+            loaded.revealed.append(row)
 
     async def perform_improvised(
         self,
@@ -413,7 +471,11 @@ class ActionService:
                 )
                 await self._persist_rolls(h, loaded, event, loaded.ctx.engine.dice.history)
                 await self.world._advance_clock(
-                    tx, loaded.ctx.tick - before, reason="combat_round", cause=event
+                    tx,
+                    loaded.ctx.tick - before,
+                    reason="combat_round",
+                    cause=event,
+                    scene=loaded.scene,
                 )
             if enc.status == "ended":
                 await tx.emit(
@@ -495,6 +557,7 @@ class ActionService:
             assert resolved is not None
             action.resolution_event_id = resolved.id
             await self._observe(h, loaded, tx, emitted)
+            await self._persist_reveals(loaded, tx, emitted)
             for idx, step in enumerate(outcome.steps):
                 self.session.add(
                     ActionStep(
@@ -541,6 +604,20 @@ class ActionService:
                 )
             await self._write_actor_states(loaded, tx, resolved)
             await self._write_items(loaded, outcome, resolved)
+            # an encounter can end on any action (last foe surrenders, flees, falls): the
+            # ledger records it here, not only on an explicit turn advance
+            prev_enc = (loaded.scene.state.get("encounter") or {}).get("status")
+            enc = loaded.ctx.encounter
+            if prev_enc == "active" and enc is not None and enc.status == "ended":
+                await tx.emit(
+                    ev.EncounterEnded(
+                        scene_id=loaded.scene.id,
+                        standing=sorted(enc.living_sides(loaded.ctx.states)),
+                        rounds=enc.round,
+                    ),
+                    scene=loaded.scene,
+                    cause=resolved,
+                )
             self._write_scene_state(loaded)
             if outcome.time_cost_seconds:
                 await self.world._advance_clock(
@@ -548,6 +625,7 @@ class ActionService:
                     outcome.time_cost_seconds,
                     reason=f"action:{request.action_key}",
                     cause=resolved,
+                    scene=loaded.scene,
                 )
 
     async def _observe(
@@ -586,6 +664,50 @@ class ActionService:
         svc = ObservationService(self.session)
         for event, payload in emitted:
             await svc.observe(tx, event, payload, loaded.scene, inputs)
+
+    async def _persist_reveals(
+        self,
+        loaded: LoadedScene,
+        tx: EventTransaction,
+        emitted: list[tuple[Event, dict[str, Any]]],
+    ) -> None:
+        """Concealed items found by a search become visible; everyone who observed the find
+        discovers the clues the object carries (physical clues are evidence; document clues
+        are only found, their content is learned by reading)."""
+        if not loaded.revealed:
+            return
+        from app.services.mystery import MysteryService
+
+        mystery = MysteryService(self.session)
+        by_item = {str(i.id): i for i in loaded.revealed}
+        await self.session.flush()
+        for event, payload in emitted:
+            if event.event_type != "item.revealed":
+                continue
+            row = by_item.get(payload.get("item", ""))
+            if row is None:
+                continue
+            row.concealed = False
+            self.session.add(
+                ItemHistory(
+                    item_id=row.id,
+                    event_id=event.id,
+                    change_type="revealed",
+                    payload={"zone": payload.get("zone"), "by": payload.get("actor")},
+                )
+            )
+            observers = list(
+                (
+                    await self.session.execute(
+                        select(Observation.actor_id).where(Observation.source_event_id == event.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            await mystery.discover_physical(
+                tx, entity_id=row.entity_id, observer_actor_ids=observers, cause=event
+            )
 
     async def _persist_rolls(
         self, h: CampaignHandle, loaded: LoadedScene, event: Event, records

@@ -56,6 +56,7 @@ TEMPLATES: dict[str, Template] = {
     ),
     "item.picked_up": Template((("actor", "subject"),), ("item", "zone"), verb="picks up"),
     "item.dropped": Template((("actor", "subject"),), ("item", "zone"), verb="drops"),
+    "item.revealed": Template((("actor", "subject"),), ("item", "zone", "name"), verb="finds"),
     "actor.moved": Template((("actor_id", "subject"),), ("to_location_id",), verb="leaves for"),
     "encounter.started": Template((), ("order",), verb="combat begins"),
 }
@@ -177,6 +178,8 @@ class ObservationService:
         subj = names.get("subject") or names.get("attacker") or "someone"
         obj = names.get("target") or names.get("cause")
         verb = t.verb if t else raw.get("event_type", "")
+        if subj == "you":
+            verb = _second_person(verb)
         vis = raw.get("outcome_visible", {})
         line = f"{subj.capitalize()} {verb}" + (f" {obj}" if obj else "")
         if raw.get("event_type") == "attack.rolled":
@@ -186,7 +189,9 @@ class ObservationService:
         elif raw.get("event_type") == "actor.took_cover":
             line += f" ({vis.get('level')})"
         elif raw.get("event_type") == "item.picked_up":
-            line = f"{subj.capitalize()} picks something up"
+            line = f"{subj.capitalize()} pick{'' if subj == 'you' else 's'} something up"
+        elif raw.get("event_type") == "item.revealed":
+            line = f"{subj.capitalize()} finds {vis.get('name') or 'something'}"
         po = raw.get("participant_only")
         if po and "amount" in po:
             line += f" for {po['amount']}"
@@ -202,3 +207,13 @@ class ObservationService:
             if e is not None:
                 out[eid] = (e.metadata_ or {}).get("descriptor") or "a stranger"
         return out
+
+
+def _second_person(verb: str) -> str:
+    """'attempts' -> 'attempt', 'closes with' -> 'close with'; irregulars are handled."""
+    head, _, rest = verb.partition(" ")
+    if head.endswith("es") and head[:-2] in ("clos", "go", "do"):
+        head = head[:-2] + ("e" if head[:-2] == "clos" else "")
+    elif head.endswith("s") and not head.endswith("ss"):
+        head = head[:-1]
+    return f"{head} {rest}".strip()

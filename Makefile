@@ -79,8 +79,8 @@ test-stress: ## Long-run synthetic campaign (slow)
 eval-local: ## Optional real-model evaluation suite (needs A9_TOKEN)
 	$(RUN) pytest -m eval --eval
 
-seed-demo: ## Seed the Red Lantern tavern campaign through the debug API (API must be running; full Frostbridge seed lands in 07)
-	curl -s -X POST http://127.0.0.1:8000/api/v1/debug/seed-demo
+seed-demo: ## Seed the full Frostbridge campaign offline and print its id map: make seed-demo ARGS="--fixture tavern --quiet"
+	$(RUN) python -m app.cli.seed $(ARGS)
 
 play: ## Terminal play harness against the running API: make play ARGS="--new" or ARGS="--campaign <id>"
 	$(RUN) python -m app.cli.play $(ARGS)

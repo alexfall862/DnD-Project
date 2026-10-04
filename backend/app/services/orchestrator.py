@@ -30,6 +30,7 @@ from app.ai.roles import AssertedFactOut, IntentInterpreterOut, RulesAdjudicator
 from app.ai.routing import ModelRouter
 from app.ai.runner import ModelRunner
 from app.config import Settings
+from app.domain import events as ev
 from app.engine.actions import ActionOutcome, ActionRequest
 from app.engine.core import RulesEngine
 from app.engine.effects import REGISTRY, EffectError, validate_step
@@ -48,15 +49,18 @@ from app.persistence.models import (
 from app.services.actions import ActionService, StaleStateError
 from app.services.ai_actors import AIActorService, Happenings
 from app.services.candidates import Candidate, build_candidates, candidates_text, slug
+from app.services.documents import DocumentService
+from app.services.events import EventTransaction
 from app.services.memory import MemoryService
 from app.services.memory_processing import MemoryProcessingService
 from app.services.narration import NarrationService
 from app.services.observations import ObservationService
 from app.services.perspective import PerspectiveService, UnauthorizedPerspective
 from app.services.player_canon import DEFAULT_POLICY, PlayerCanonService
+from app.services.scenes import SceneService
 from app.services.speech import ConveysItem, LeakageError, SpeechService
 from app.services.turns import Turn, budget_from_settings
-from app.services.vocab import ACTION_MAP, FREE_TYPES, SPEECH_TYPES
+from app.services.vocab import ACTION_MAP, FREE_TYPES, READ_TYPES, SPEECH_TYPES
 from app.services.world import CampaignHandle, WorldError, WorldService
 
 Channel = Literal["auto", "do", "say", "whisper", "private", "ooc"]
@@ -150,6 +154,8 @@ class SessionOrchestrator:
         self.actions = ActionService(session, engine)
         self.speech = SpeechService(session)
         self.canon = PlayerCanonService(session)
+        self.scenes = SceneService(session)
+        self.documents = DocumentService(session)
         self.memory = MemoryService(session, embedder)
         self.compiler = ContextCompiler(session, memory=self.memory, engine=engine)
         self.runner = ModelRunner(session, ModelRouter(settings, provider))
@@ -161,6 +167,7 @@ class SessionOrchestrator:
             runner=self.runner,
             actions=self.actions,
             speech=self.speech,
+            scenes=self.scenes,
         )
         self.narration = NarrationService(session, compiler=self.compiler, runner=self.runner)
         self.memory_processing = MemoryProcessingService(
@@ -404,6 +411,12 @@ class SessionOrchestrator:
             spoke = await self._speak(
                 h, req, scene, text, channel, intent, None, candidates, turn, result, emit, hap
             )
+        moved = await self.perspective.repo.current_scene(req.actor_id)
+        if moved is None:
+            raise WorldError("actor left every scene")
+        if moved.id != scene.id:
+            scene = moved  # the destination is now the live scene
+            hap.in_combat = self._in_combat(scene)
 
         # conversation time (time-accounting §2)
         if spoke:
@@ -418,6 +431,9 @@ class SessionOrchestrator:
             await self._ai_combat(h, req, scene, turn, result, emit, last_action)
         else:
             await self._ai_reactions(h, req, scene, hap, turn, result, emit)
+
+        # 13b: offscreen scenes catch up (bounded), without anything reaching the human
+        await self._catch_up_offscreen(h, turn, result)
 
         # 14: bundle the turn as the focus actor perceived it
         await self.session.flush()
@@ -1025,6 +1041,10 @@ class SessionOrchestrator:
         action_key = ACTION_MAP.get(kind)
         cand: Candidate | None = step["candidate"]
         target: str | None = None
+        if cand is not None and cand.kind == "location":
+            return await self._travel(h, req, scene, step, cands, turn, result, emit)
+        if kind in READ_TYPES and cand is not None and cand.kind == "item":
+            return await self._read(h, req, cand, turn, result, emit)
         if action_key is not None:
             if (
                 action_key in ("action.move", "action.sprint")
@@ -1093,6 +1113,173 @@ class SessionOrchestrator:
             turn.mark_first_output()
             emit("mechanics", {"action": entry, "events": [e.get("type") for e in outcome.events]})
         return outcome
+
+    async def _read(
+        self,
+        h: CampaignHandle,
+        req: PlayRequest,
+        cand: Candidate,
+        turn: Turn,
+        result: PlayResult,
+        emit,
+    ) -> ActionOutcome | None:
+        """Reading a Document (c&k §3): an Observation whose Claims come from the stored
+        `conveys[]`; the text is returned verbatim and never re-extracted."""
+        try:
+            r = await self.documents.read(h, req.actor_id, uuid.UUID(cand.id), turn_id=turn.turn_id)
+        except WorldError as exc:
+            result.actions.append(
+                {"action": "read", "target": cand.id, "status": "invalid", "reason": str(exc)}
+            )
+            result.mechanical_notices.append(f"(OOC) {exc}")
+            return None
+        entry = {
+            "action": "read",
+            "target": cand.id,
+            "status": "succeeded",
+            "reason": "",
+            "summary": f"read {cand.known_as}",
+            "text": r.text,
+            "claims": len(r.claims),
+        }
+        result.actions.append(entry)  # the read_document Observation renders the text
+        turn.mark_first_output()
+        emit("mechanics", {"action": entry, "events": ["document.read"]})
+        return None
+
+    async def _travel(
+        self,
+        h: CampaignHandle,
+        req: PlayRequest,
+        scene: Scene,
+        step: dict[str, Any],
+        cands: list[Candidate],
+        turn: Turn,
+        result: PlayResult,
+        emit,
+    ) -> ActionOutcome | None:
+        """Travel to a connected location (Milestone 07, time-accounting §3/§5). Companions
+        the player names (intent targets / params.with) who are party members at the same
+        place come along; everyone else stays, and their scene becomes offscreen."""
+        cand: Candidate = step["candidate"]
+        by_ref = {c.ref: c for c in cands}
+        companions: list[uuid.UUID] = []
+        refs = list(step["intent"].params.get("with") or []) + list(
+            getattr(step["intent"], "companion_refs", []) or []
+        )
+        for r in refs:
+            c = match_ref(cands, r) if r not in by_ref else by_ref[r]
+            if c is not None and c.kind == "actor" and c.id:
+                companions.append(uuid.UUID(c.id))
+        companions = [a for a in companions if a != req.actor_id]
+        try:
+            tr = await self.scenes.travel(
+                h,
+                [req.actor_id, *companions],
+                uuid.UUID(cand.id),
+                created_by_type="human",
+                created_by_id=req.actor_id,
+            )
+        except WorldError as exc:
+            result.actions.append(
+                {"action": "travel", "target": cand.id, "status": "invalid", "reason": str(exc)}
+            )
+            result.mechanical_notices.append(f"(OOC) {exc}")
+            return None
+        result.time_advanced_seconds += tr.travel_seconds
+        entry = {
+            "action": "travel",
+            "target": cand.id,
+            "status": "succeeded",
+            "reason": "",
+            "summary": f"travel to {cand.known_as}"
+            + (f" with {len(companions)} companion(s)" if companions else "")
+            + (" (joined the scene there)" if tr.joined_existing else ""),
+            "scene_id": str(tr.scene.id),
+            "companions": [str(c) for c in companions],
+        }
+        result.actions.append(entry)
+        turn.mark_first_output()
+        emit(
+            "mechanics",
+            {
+                "action": entry,
+                "events": [
+                    "actor.moved",
+                    "scene.started" if not tr.joined_existing else "scene.participant_joined",
+                ],
+            },
+        )
+        turn.extra.setdefault("travel", []).append(
+            {
+                "to": cand.id,
+                "joined": tr.joined_existing,
+                "merged_from": [str(x) for x in tr.merged_from],
+            }
+        )
+        return None
+
+    async def _catch_up_offscreen(self, h: CampaignHandle, turn: Turn, result: PlayResult) -> None:
+        """time-accounting §4 (bounded form): an offscreen scene lagging the world clock by
+        more than the granularity gets at most ONE AI decision (its most important AI actor,
+        intentions only), applied through full mechanics; then its local_tick is set to the
+        clock. At most `max_offscreen_catchups_per_turn` scenes per live turn; nothing is
+        narrated and the human receives nothing (human-visibility §3)."""
+        granularity = int(getattr(self.settings, "catchup_granularity_seconds", 600))
+        max_scenes = int(getattr(self.settings, "max_offscreen_catchups_per_turn", 2))
+        clock = await self.world.clock(h)
+        done = 0
+        for scene in await self.scenes.offscreen_scenes(h):
+            if done >= max_scenes:
+                break
+            lag = clock.current_tick - scene.local_tick
+            if lag <= granularity:
+                continue
+            # 07: only AI party members act on their own during a lull (they carry the party's
+            # purpose offscreen); NPC scenes wait for plan steps and triggers (Milestone 08).
+            ai = [a for a in await self.ai.ai_participants(scene) if a.actor_type == "pc"]
+            calls = 0
+            if ai and turn.can_make_sync_call():
+                order = {"full": 0, "important": 1, "standard": 2, "background": 3}
+                actor = sorted(ai, key=lambda a: order.get(a.importance_tier, 9))[0]
+                minutes = max(1, lag // 60)
+                situation = (
+                    f"About {minutes} minutes have passed here while the others are elsewhere. "
+                    "Decide what you did with that time in this place: act through intentions "
+                    "(search, move, wait, speak to someone present). No narration."
+                )
+                decisions = await self.ai.decide_many(
+                    h, scene, [actor], {actor.id: situation}, turn, kind="catch_up"
+                )
+                calls = len(decisions)
+                for d in decisions:
+                    applied = await self.ai.apply(h, scene.id, d, turn)
+                    turn.extra.setdefault("offscreen", []).append(
+                        {
+                            "scene_id": str(scene.id),
+                            "actor_id": str(actor.id),
+                            "actions": applied.actions,
+                            "spoke": applied.spoke,
+                            "rejected": applied.rejected,
+                        }
+                    )
+            fresh = await self.session.get(Scene, scene.id)
+            if fresh is not None and fresh.status == "active":
+                async with EventTransaction(self.session, h.campaign_id, h.timeline_id) as tx:
+                    from_tick = fresh.local_tick
+                    await tx.emit(
+                        ev.SceneCaughtUp(
+                            scene_id=fresh.id,
+                            from_tick=from_tick,
+                            to_tick=tx.clock.current_tick,
+                            model_calls=calls,
+                        ),
+                        scene=fresh,
+                    )
+                    fresh.local_tick = tx.clock.current_tick
+            done += 1
+        if done:
+            turn.extra["offscreen_catchups"] = done
 
     async def _speak(
         self,
@@ -1219,7 +1406,7 @@ class SessionOrchestrator:
             scene.state = {**scene.state, "conversation_late": True}
             return 0
         seconds = min(seconds, CONVERSATION_CAP_S - used)
-        await self.world.advance_time(h, seconds, reason=f"conversation:{band}")
+        await self.world.advance_time(h, seconds, reason=f"conversation:{band}", scene_id=scene.id)
         fresh = await self.session.get(Scene, scene.id)
         fresh.state = {**fresh.state, "conversation_seconds": used + seconds}
         return seconds

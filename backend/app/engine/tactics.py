@@ -132,10 +132,10 @@ def choose_action(
     budget = enc.budget(actor) if enc else None
     cur, mx = _hp(ctx, actor)
     if mx and cur / mx < policy.flee_below:
-        return "action.flee", None, "health below flee threshold"
+        return _flee_step(ctx, actor, budget, "health below flee threshold")
     foes = hostiles(ctx, actor)
     if policy.intent == "flee":
-        return "action.flee", None, "policy: flee"
+        return _flee_step(ctx, actor, budget, "policy: flee")
     if not foes:
         return "action.wait", None, "no standing hostiles"
     target = policy.target if policy.target in foes else None
@@ -159,6 +159,33 @@ def choose_action(
     if has_major and ctx.space.position(actor).cover == "none":
         return "action.take_cover", None, "no reachable target; take cover"
     return "action.wait", None, "nothing useful to do"
+
+
+def _flee_step(ctx: SceneContext, actor: str, budget, reason: str) -> tuple[str, str | None, str]:
+    """Fleeing is a route, not a wish: disengage if engaged, head for the nearest exit zone,
+    and leave through it once it is within reach (frostbridge §30: thieves prefer running)."""
+    space = ctx.space
+    pos = space.position(actor)
+    has_move = budget is None or budget.movement >= 1
+    has_major = budget is None or budget.major >= 1
+    if pos.engaged_with:
+        if has_move:
+            return "action.disengage", None, f"{reason}; disengage first"
+        return "action.wait", None, f"{reason}; engaged and out of movement"
+    exits = [k for k, z in space.zones.items() if z.exit]
+    if not exits:
+        return "action.flee", None, reason  # legacy spaces without exits: the resolver decides
+    routes = {k: space.path(pos.zone, k) for k in exits}
+    routes = {k: r for k, r in routes.items() if r is not None}
+    if not routes:
+        return "action.take_cover", None, f"{reason}; no route to an exit"
+    exit_zone, route = min(routes.items(), key=lambda kv: len(kv[1]))
+    steps = ctx.engine.ruleset.actions["action.move"].resolution.movement_steps or 1
+    if len(route) - 1 <= steps and has_major and has_move:
+        return "action.flee", exit_zone, reason
+    if has_move and len(route) > 1:
+        return "action.move", route[min(steps, len(route) - 1)], f"{reason}; toward {exit_zone}"
+    return "action.wait", None, f"{reason}; cannot move"
 
 
 def behavior_reaction_chooser(ctx_dims: dict[str, dict[str, float]]):

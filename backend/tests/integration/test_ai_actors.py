@@ -904,7 +904,9 @@ async def test_tavern_scene_belief_stores_match_the_expected_table(
     # objective truth untouched, deception private, provenance complete
     assert all(
         f.canon_status == "established"
-        for f in (await session.execute(select(Fact))).scalars().all()
+        for f in (await session.execute(select(Fact).where(Fact.campaign_id == w.h.campaign_id)))
+        .scalars()
+        .all()
     )
     renn_claims = (
         (await session.execute(select(Claim).where(Claim.speaker_actor_id == w.actors["Renn"])))

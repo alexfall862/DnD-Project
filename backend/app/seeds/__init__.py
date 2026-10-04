@@ -1,2 +1,3 @@
-"""Seed worlds. `frostbridge_tavern` is the deterministic Red Lantern scene shared by the test
-fixture, the CLI harness and (until Milestone 07 lands the full fixture) `make seed-demo`."""
+"""Seed worlds. `frostbridge` is the full deterministic fixture (frostbridge-demo.md) behind
+`make seed-demo`, the harness `--new` and the vertical-slice test; `frostbridge_tavern` is
+the small Red Lantern scene the focused leakage/orchestrator tests use."""

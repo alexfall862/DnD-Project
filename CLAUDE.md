@@ -29,8 +29,8 @@ once per session; then, for each milestone, read only the `## Read` context pack
 | `docs/HARDWARE-TARGET.md` | Inference host and measured profile numbers (filled by the 04b spike). |
 | `backend/` | Python project: FastAPI app in `backend/app/`, Alembic in `backend/migrations/`, tests in `backend/tests/`. |
 | `backend/rulesets/core_adventure/` | Declarative first ruleset (from Milestone 02a). |
-| `backend/app/seeds/` | The Red Lantern seed (`frostbridge_tavern.py`) shared by tests, `/debug/seed-demo` and the harness. |
-| `backend/app/cli/play.py` | Terminal harness over HTTP (`make play ARGS="--new"`); `/debug …` needs `DEBUG_MODE=true`. |
+| `backend/app/seeds/` | `frostbridge.py` is the full deterministic fixture (frostbridge-demo.md; `make seed-demo`, harness `--new`, the vertical-slice test); `frostbridge_tavern.py` is the small Red Lantern scene the focused leakage/orchestrator tests use. |
+| `backend/app/cli/play.py` | Terminal harness over HTTP (`make play ARGS="--new"`, `--fixture tavern` for the small scene); `/debug …` needs `DEBUG_MODE=true`. `app/cli/seed.py` seeds offline. |
 | `scripts/` | Dev scripts; `scripts/play.py` launches the harness; `scripts/spike/` is the throwaway 04b model spike. |
 | `frontend/` | Placeholder until Milestone 10. |
 
@@ -53,6 +53,11 @@ once per session; then, for each milestone, read only the `## Read` context pack
   `campaign.settings` keys `spotlight`, `narration_style`, `latency_budget`, `player_canon_policy`.
 - Live A9 turn ≈ 36–38 s (interpreter ≈ 10 s, actor 13–21 s, narrator streams within ~4 s);
   numbers and the design-iteration fixes are in `docs/tasks/milestone-06d-cli-play-harness.md`.
+- Milestone 07 landed scene transitions (`SceneService.travel`: join/merge, live vs offscreen
+  clocks), concealed items revealed by search, documents, mysteries/clues, deterministic
+  scheduled events and a one-call offscreen catch-up for AI party members; the World
+  Simulator, worker and plan reasoning are Milestone 08 (`docs/DECISIONS.md`, "Frostbridge
+  fixture (07)").
 
 ## Commands
 

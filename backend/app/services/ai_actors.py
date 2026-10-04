@@ -150,6 +150,7 @@ class AIActorService:
         runner: ModelRunner,
         actions: ActionService,
         speech: SpeechService,
+        scenes: Any = None,
     ) -> None:
         self.session = session
         self.settings = settings
@@ -158,6 +159,7 @@ class AIActorService:
         self.runner = runner
         self.actions = actions
         self.speech = speech
+        self.scenes = scenes
         self.perspective = PerspectiveService(session)
         self.knowledge = KnowledgeService(session)
         self.psychology = PsychologyService(session)
@@ -371,6 +373,40 @@ class AIActorService:
             if key is None:
                 applied.notes.append(f"unknown intention {kind!r} ignored")
                 continue
+            tcand = by_ref.get(it.target_ref or "")
+            if tcand is not None and tcand.kind == "location" and self.scenes is not None:
+                if ctx_in_combat(scene):
+                    applied.notes.append("travel ignored during combat")
+                    continue
+                try:
+                    tr = await self.scenes.travel(
+                        h,
+                        [d.actor_id],
+                        uuid.UUID(tcand.id),
+                        created_by_type="ai",
+                        created_by_id=d.actor_id,
+                    )
+                except WorldError as exc:
+                    applied.actions.append(
+                        {
+                            "action": "travel",
+                            "target": tcand.id,
+                            "status": "invalid",
+                            "reason": str(exc),
+                        }
+                    )
+                    continue
+                applied.actions.append(
+                    {
+                        "action": "travel",
+                        "target": tcand.id,
+                        "status": "succeeded",
+                        "scene_id": str(tr.scene.id),
+                        "private": it.private,
+                    }
+                )
+                emit("reaction", {"actor_id": str(d.actor_id), "travel": tcand.known_as})
+                break  # the actor is no longer in this scene
             profile = await self.psychology.autonomy(d.actor_id)
             g = autonomy_gate(profile, key, params={"private": it.private})
             target = self._target_id(by_ref, it.target_ref)
@@ -597,6 +633,7 @@ class AIActorService:
             or getattr(getattr(out, "speech_act", None), "type", "") == "lie"
         )
         items: list[ConveysItem] = []
+        ref_entities: set[str] = set()  # entities named by fact/belief refs (completeness)
         for c in out.conveys[:MAX_CONVEYS]:
             deliberate = bool(c.contradicts_ref and c.contradicts_ref in d.ref_map)
             if c.ref_id:
@@ -626,7 +663,8 @@ class AIActorService:
                 # A denial (asserts_false / contradicts_ref) rarely restates the predicate,
                 # so names in the text or the question suffice for it.
                 denial = c.stance == "asserts_false" or deliberate
-                pred_terms, name_terms = record
+                pred_terms, name_terms, ref_ids = record
+                ref_entities |= ref_ids
                 spoken_terms = _terms(lower)
                 if c.stance != "question":
                     if denial:
@@ -665,7 +703,7 @@ class AIActorService:
         mentioned = {eid for eid, nm in names.items() if nm and _terms(nm) & _terms(lower)} - {
             await self._self_entity(d.actor_id)
         }
-        referenced: set[str] = set()
+        referenced: set[str] = set(ref_entities)
         for it in items:
             if it.proposition:
                 referenced |= {
@@ -694,9 +732,9 @@ class AIActorService:
 
     async def _record_terms(
         self, speaker: uuid.UUID, kind: str, rid: uuid.UUID, names: dict[uuid.UUID, str]
-    ) -> tuple[set[str], set[str]] | None:
-        """(predicate terms, entity-name terms) of a referenced belief/fact as the speaker
-        would name them."""
+    ) -> tuple[set[str], set[str], set[str]] | None:
+        """(predicate terms, entity-name terms, referenced entity ids) of a referenced
+        belief/fact as the speaker would name them."""
         if kind == "belief_ref":
             b = await self.perspective.repo.holds_belief(speaker, rid)
             if b is None:
@@ -713,14 +751,17 @@ class AIActorService:
         if prop.value is not None:
             pred |= _terms(str(prop.value))
         name_terms: set[str] = set()
+        ref_ids: set[str] = set()
         for ref in (prop.subject, prop.object):
             try:
                 eid = uuid.UUID(str(ref)) if ref else None
             except ValueError:
                 eid = None
+            if eid is not None:
+                ref_ids.add(str(eid))
             if eid in names:
                 name_terms |= _terms(names[eid])
-        return pred, name_terms
+        return pred, name_terms, ref_ids
 
     async def _claim_extractor(
         self,
@@ -1137,6 +1178,11 @@ class AIActorService:
                     BeliefProposal(p, "inference", conf, "inference", (f"from {b.id}",)),
                     acquired_event=event,
                 )
+
+
+def ctx_in_combat(scene: Scene) -> bool:
+    enc = scene.state.get("encounter") or {}
+    return enc.get("status") == "active"
 
 
 def _terms(text: str) -> set[str]:

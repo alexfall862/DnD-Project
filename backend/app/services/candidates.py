@@ -68,6 +68,19 @@ async def build_candidates(
             out.append(Candidate(ref, "actor", aid or "", p.known_as, p.entity_id, hostile))
     for z in (scene.state.get("space") or {}).get("zones", []):
         out.append(Candidate(z["key"], "zone", z["key"], z.get("name") or z["key"]))
+    # places one can travel to from here: known by name, or by what can be seen of them
+    if scene.location_id is not None:
+        from app.services.scenes import SceneService
+
+        names = await perspective.known_entities(actor_id)
+        for loc, ent, _secs in await SceneService(perspective.repo.s).connected_locations(
+            scene.location_id
+        ):
+            label = names.get(ent.id) or (ent.metadata_ or {}).get("descriptor") or "somewhere"
+            base = slug(label, "place")
+            used[base] = used.get(base, 0) + 1
+            ref = base if used[base] == 1 else f"{base}_{used[base]}"
+            out.append(Candidate(ref, "location", str(loc.id), label, ent.id))
     for i in await perspective.inventory(actor_id):
         name = i.name or i.template_key or "item"
         out.append(Candidate(slug(name, "item"), "item", str(i.item_id), name))
@@ -90,7 +103,9 @@ def candidates_text(cands: list[Candidate]) -> str:
     )
     zones = ", ".join(c.ref for c in cands if c.kind == "zone")
     items = ", ".join(f"{c.ref} ({c.known_as})" for c in cands if c.kind == "item")
+    places = ", ".join(f"{c.ref} ({c.known_as})" for c in cands if c.kind == "location")
     return (
         f"Entity refs you may use — people: self, {actors or 'none'}; "
-        f"zones: {zones or 'none'}; items: {items or 'none'}."
+        f"zones: {zones or 'none'}; items: {items or 'none'}; "
+        f"places to travel to: {places or 'none'}."
     )

@@ -7,7 +7,17 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.persistence.models.base import Base, created_at_col, jsonb_col, uuid_pk
@@ -78,6 +88,10 @@ class Item(Base):
     hidden_properties: Mapped[dict[str, Any]] = jsonb_col()
     public_properties: Mapped[dict[str, Any]] = jsonb_col()
     provenance: Mapped[dict[str, Any]] = jsonb_col()
+    # A concealed item lies in a location/zone but is not visible until a successful search
+    # reveals it (Milestone 07); it is excluded from scene loads, candidates and observations.
+    concealed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    destroyed_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("events.id"))
     created_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("events.id"))
 
     __table_args__ = (

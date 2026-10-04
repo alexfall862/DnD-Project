@@ -292,6 +292,9 @@ class ContextCompiler:
         items: list[ContextItemDraft] = []
         names = await p.known_entities(actor_id)
         self_name = names.get(actor.entity_id) or await repo.self_name(actor_id) or "you"
+        names.setdefault(
+            actor.entity_id, self_name
+        )  # own beliefs read "Renn killed", not "someone"
         profile = actor.mechanical_profile or {}
         behavior = actor.behavior_profile or {}
 

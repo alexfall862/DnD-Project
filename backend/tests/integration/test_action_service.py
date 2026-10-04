@@ -13,6 +13,7 @@ from app.engine.dice import DiceService, SeedStream, parse_dice, roll_with_seed
 from app.persistence.models import (
     Action,
     ConditionInstanceRow,
+    Entity,
     Event,
     Item,
     ItemHistory,
@@ -363,5 +364,14 @@ async def test_round_end_advances_clock_and_fires_triggers(
     assert (await world.clock(h)).current_tick == tick0 + 6
     types = [e.event_type for e in (await world.events(h))]
     assert "encounter.round_ended" in types and types[-1] == "time.advanced"
-    conds = (await session.execute(select(ConditionInstanceRow))).scalars().all()
+    mine = select(Entity.id).where(Entity.campaign_id == h.campaign_id)
+    conds = (
+        (
+            await session.execute(
+                select(ConditionInstanceRow).where(ConditionInstanceRow.target_entity_id.in_(mine))
+            )
+        )
+        .scalars()
+        .all()
+    )
     assert conds == []  # nothing burning yet

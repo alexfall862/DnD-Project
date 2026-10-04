@@ -555,6 +555,34 @@ def move_entity(state: ActorState, p: dict[str, Any], ctx: EffectContext) -> lis
     ]
 
 
+@primitive("alter_feature")
+def alter_feature(state: ActorState, p: dict[str, Any], ctx: EffectContext) -> list[Mutation]:
+    """Change a zone feature of the scene space (a burned curtain stays burned, a toppled shelf
+    keeps blocking): `zone`, `feature` (current text), `replacement` (new text, or "" to remove).
+    The space is persisted with the scene state, so the consequence outlives the encounter."""
+    space = ctx.values.get("space")
+    zone_key = p.get("zone")
+    if space is None or not zone_key or zone_key not in space.zones:
+        raise EffectError(f"alter_feature: unknown zone {zone_key!r}")
+    zone = space.zones[zone_key]
+    feature = p.get("feature")
+    replacement = p.get("replacement", "")
+    before = list(zone.features)
+    if feature in zone.features:
+        zone.features = [
+            replacement if f == feature else f
+            for f in zone.features
+            if (f != feature or replacement)
+        ]
+    elif replacement:
+        zone.features = [*zone.features, replacement]
+    return [
+        Mutation(
+            "feature", state.actor_key, zone_key, before, list(zone.features), ctx.source, dict(p)
+        )
+    ]
+
+
 @primitive("create_entity")
 def create_entity(state: ActorState, p: dict[str, Any], ctx: EffectContext) -> list[Mutation]:
     return [

@@ -437,6 +437,145 @@ class MemoryCompressed(EventPayload):
     compressed_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
+# -- Milestone 07: mysteries, clues, documents, scheduling, factions, scene transitions ----------
+
+
+class MysteryCreated(EventPayload):
+    event_type: ClassVar[str] = "mystery.created"
+    mystery_id: uuid.UUID
+    key: str | None = None
+    question: str
+    truth_fact_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class MysteryActivated(EventPayload):
+    """Activation locks the objective answer (Invariant 10)."""
+
+    event_type: ClassVar[str] = "mystery.activated"
+    mystery_id: uuid.UUID
+    solution_locked: bool = True
+
+
+class ClueCreated(EventPayload):
+    event_type: ClassVar[str] = "clue.created"
+    clue_id: uuid.UUID
+    mystery_id: uuid.UUID
+    key: str | None = None
+    supported_fact_id: uuid.UUID | None = None
+    physical_entity_id: uuid.UUID | None = None
+    clue_type: str
+
+
+class ClueDiscovered(EventPayload):
+    event_type: ClassVar[str] = "clue.discovered"
+    clue_id: uuid.UUID
+    actor_id: uuid.UUID
+    route: str  # physical|document|testimony|inference|mechanic
+    fidelity: str = "full"
+    claim_id: uuid.UUID | None = None
+
+
+class ClueDestroyed(EventPayload):
+    event_type: ClassVar[str] = "clue.destroyed"
+    clue_id: uuid.UUID
+    reason: str = ""
+
+
+class ItemRevealed(MechanicEvent):
+    """A concealed item in the searched zone becomes visible (actor = the searcher)."""
+
+    event_type: ClassVar[str] = "item.revealed"
+    item: str
+    zone: str
+    name: str = ""
+
+
+class ItemDestroyed(EventPayload):
+    event_type: ClassVar[str] = "item.destroyed"
+    item_id: uuid.UUID
+    reason: str = ""
+
+
+class DocumentRead(EventPayload):
+    event_type: ClassVar[str] = "document.read"
+    actor_id: uuid.UUID
+    item_id: uuid.UUID
+    claim_count: int = 0
+
+
+class ScheduledEventCreated(EventPayload):
+    event_type: ClassVar[str] = "scheduled_event.created"
+    scheduled_event_id: uuid.UUID
+    scheduled_tick: int
+    scheduled_type: str
+
+
+class ScheduledEventFired(EventPayload):
+    event_type: ClassVar[str] = "scheduled_event.fired"
+    scheduled_event_id: uuid.UUID
+    scheduled_tick: int
+    scheduled_type: str
+    outcome: str  # processed|cancelled|skipped
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class FactionCreated(EventPayload):
+    event_type: ClassVar[str] = "faction.created"
+    faction_id: uuid.UUID
+    name: str
+    member_actor_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class PlanCreated(EventPayload):
+    event_type: ClassVar[str] = "plan.created"
+    plan_id: uuid.UUID
+    goal_id: uuid.UUID
+    steps: int
+
+
+class PlanAdvanced(EventPayload):
+    event_type: ClassVar[str] = "plan.advanced"
+    plan_id: uuid.UUID
+    from_step: int
+    to_step: int
+    reason: str = ""
+
+
+class PartyCreated(EventPayload):
+    event_type: ClassVar[str] = "party.created"
+    party_id: uuid.UUID
+    name: str
+    member_actor_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class ScenesMerged(EventPayload):
+    """Reunion (time-accounting §5): participants of `from_scene_id` join `into_scene_id`;
+    no Observations or Claims are created."""
+
+    event_type: ClassVar[str] = "scene.merged"
+    from_scene_id: uuid.UUID
+    into_scene_id: uuid.UUID
+    actor_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class SceneCaughtUp(EventPayload):
+    """An offscreen scene's local clock fast-forwarded to the world clock."""
+
+    event_type: ClassVar[str] = "scene.caught_up"
+    scene_id: uuid.UUID
+    from_tick: int
+    to_tick: int
+    model_calls: int = 0
+
+
+class MechanicalDefinitionCreated(EventPayload):
+    event_type: ClassVar[str] = "mechanical_definition.created"
+    definition_id: uuid.UUID
+    definition_key: str
+    definition_type: str
+    source_kind: str
+
+
 PAYLOAD_TYPES: dict[str, type[EventPayload]] = {
     cls.event_type: cls
     for cls in (
@@ -490,6 +629,23 @@ PAYLOAD_TYPES: dict[str, type[EventPayload]] = {
         CanonDetailEstablished,
         JournalEntryWritten,
         MemoryCheckpoint,
+        MysteryCreated,
+        MysteryActivated,
+        ClueCreated,
+        ClueDiscovered,
+        ClueDestroyed,
+        ItemRevealed,
+        ItemDestroyed,
+        DocumentRead,
+        ScheduledEventCreated,
+        ScheduledEventFired,
+        FactionCreated,
+        PlanCreated,
+        PlanAdvanced,
+        PartyCreated,
+        ScenesMerged,
+        SceneCaughtUp,
+        MechanicalDefinitionCreated,
     )
 }
 

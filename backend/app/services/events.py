@@ -34,6 +34,31 @@ from app.persistence.models import (
     WorldClock,
 )
 
+UNIT_OF_WORK = "unit_of_work"  # session.info flag: EventTransactions flush instead of commit
+
+
+class unit_of_work:  # noqa: N801 - used as a context manager
+    """Group many EventTransactions into one database transaction (seeding, fixtures): each
+    still allocates its events and bumps versions, but the commit happens once at the end and
+    any failure rolls back everything. Never used on the play path."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def __aenter__(self) -> unit_of_work:
+        self.session.info[UNIT_OF_WORK] = True
+        if not self.session.in_transaction():
+            await self.session.begin()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        self.session.info.pop(UNIT_OF_WORK, None)
+        if exc_type is not None:
+            await self.session.rollback()
+            return False
+        await self.session.commit()
+        return False
+
 
 class EventTransactionError(RuntimeError):
     pass
@@ -106,6 +131,7 @@ class EventTransaction:
         tb: TracebackType | None,
     ) -> bool:
         s = self.session
+        deferred = bool(s.info.get(UNIT_OF_WORK))
         if exc_type is not None:
             await s.rollback()
             return False
@@ -113,12 +139,16 @@ class EventTransaction:
             if s.dirty or s.new or s.deleted:
                 await s.rollback()
                 raise EventTransactionError("projection changes without an Event are forbidden")
-            await s.rollback()
+            if not deferred:
+                await s.rollback()
             return False
         self.campaign.world_version = self.world_version_after
         for scene in self._touched_scenes.values():
             scene.version += 1
-        await s.commit()
+        if deferred:
+            await s.flush()  # the enclosing unit of work commits or rolls back as a whole
+        else:
+            await s.commit()
         return False
 
     # -- emitting ----------------------------------------------------------------------------

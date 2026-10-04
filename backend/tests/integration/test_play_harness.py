@@ -81,7 +81,7 @@ def fixtures(app):
 async def test_scripted_session_through_the_harness(app, client, fixtures) -> None:
     lines: list[str] = []
     h = Harness(client, out=lines.append)
-    await h.new_campaign()
+    await h.new_campaign(fixture="tavern")
     assert h.actor_name == "Alex" and h.campaign_id and h.scene_id
     scene = await h.show_scene()
     assert "Red Lantern Tavern" in lines[-2] and "Mira" in lines[-1]
@@ -166,9 +166,26 @@ async def test_scripted_session_through_the_harness(app, client, fixtures) -> No
 async def test_harness_refuses_ai_actors_and_reports_api_errors(app, client, fixtures) -> None:
     lines: list[str] = []
     h = Harness(client, out=lines.append)
-    await h.new_campaign()
+    await h.new_campaign(fixture="tavern")
     with pytest.raises(HarnessError):
         await h.load_campaign(h.campaign_id, actor="Elara")
+
+
+async def test_harness_opens_the_full_frostbridge_fixture_at_the_gate(
+    app, client, fixtures
+) -> None:
+    """The default `--new` seed is the whole Frostbridge world: the party starts at the Town
+    Gate in cold rain, Mira and Renn are elsewhere, and the player can read and travel."""
+    lines: list[str] = []
+    h = Harness(client, out=lines.append)
+    await h.new_campaign()
+    scene = await h.show_scene()
+    assert "Town Gate" in lines[-2]
+    known = {p["known_as"] for p in scene["participants"] if not p["is_self"]}
+    assert "Elara" in known and "Tomas" in known and "Mira" not in known
+    lines.clear()
+    await h.handle("/inventory")
+    assert any("knife" in ln for ln in lines) and not any("Dagger" in ln for ln in lines)
     app.state.settings.debug_mode = False
     try:
         with pytest.raises(HarnessError):

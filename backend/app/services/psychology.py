@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain import events as ev
-from app.engine.autonomy import AutonomyProfile
+from app.engine.autonomy import DOMAINS, AutonomyProfile
 from app.persistence.models import (
     Actor,
     ActorAIProfile,
@@ -24,6 +24,7 @@ from app.persistence.models import (
     Event,
     Goal,
     GoalTarget,
+    Plan,
     Relationship,
     RelationshipDelta,
 )
@@ -56,8 +57,16 @@ class PsychologyService:
     # -- autonomy ----------------------------------------------------------------------------
 
     async def autonomy(self, actor_id: uuid.UUID) -> AutonomyProfile:
+        """The `ask` defaults protect the human's party from their AI companions' big
+        decisions (world-memory §4). An NPC without an explicit profile has no one to ask and
+        is autonomous in every domain: a thief may surrender, a captain may walk out."""
         row = await self.repo.ai_profile(actor_id)
-        return AutonomyProfile.from_dict(row.autonomy_profile if row else None)
+        if row is not None:
+            return AutonomyProfile.from_dict(row.autonomy_profile)
+        actor = await self.repo.actor(actor_id)
+        if actor is not None and actor.actor_type != "pc":
+            return AutonomyProfile({d: "autonomous" for d in DOMAINS})
+        return AutonomyProfile.from_dict(None)
 
     async def set_ai_profile(
         self,
@@ -151,6 +160,31 @@ class PsychologyService:
             )
             goal.created_event_id = event.id
         return goal
+
+    async def create_plan(
+        self,
+        h: CampaignHandle,
+        goal_id: uuid.UUID,
+        steps: list[str],
+        *,
+        current_step: int = 0,
+    ) -> Plan:
+        """A plan is an ordered list of steps toward a goal (world-memory §4 faction plans).
+        Steps advance only through events (`plan.advanced`), scheduled or simulated."""
+        if not steps:
+            raise WorldError("a plan needs steps")
+        async with self._tx(h) as tx:
+            goal = await self.session.get(Goal, goal_id)
+            if goal is None:
+                raise WorldError("goal not found")
+            plan = Plan(goal_id=goal.id, steps=list(steps), current_step=current_step)
+            self.session.add(plan)
+            await self.session.flush()
+            event = await tx.emit(
+                ev.PlanCreated(plan_id=plan.id, goal_id=goal.id, steps=len(steps))
+            )
+            plan.created_event_id = event.id
+        return plan
 
     async def update_goal(
         self,

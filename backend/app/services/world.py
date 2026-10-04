@@ -9,6 +9,7 @@ Milestone 03, actor-facing reads go through `PerspectiveService` instead.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -21,11 +22,17 @@ from app.persistence.models import (
     Actor,
     ActorController,
     Campaign,
+    Document,
     Entity,
     Event,
+    Faction,
+    FactionMembership,
     Item,
+    ItemHistory,
     Location,
     LocationEdge,
+    Party,
+    PartyMembership,
     Scene,
     SceneParticipant,
     Timeline,
@@ -409,9 +416,20 @@ class WorldService:
         importance_tier: str = "standard",
         item_type: str = "gear",
         provenance: dict[str, Any] | None = None,
+        concealed: bool = False,
+        concealment_difficulty: str | None = None,
+        document: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Item:
         """A unique persistent item (world-memory §15). Ownership and possession are distinct;
-        hidden properties exist objectively from creation (rules-engine §22)."""
+        hidden properties exist objectively from creation (rules-engine §22).
+
+        `concealed` items lie in a location zone unseen until a successful search reveals them
+        (`concealment_difficulty` names a ruleset difficulty the search total must meet).
+        `document` = {text, conveys, author_entity_id?, language?} makes the item an immutable
+        Document (world-memory §15; c&k §3) in the same transaction."""
+        if concealed and (location_id is None or possessor_actor_id is not None):
+            raise WorldError("only an item lying in a location can be concealed")
         async with self._tx(h) as tx:
             possessor_entity = owner_entity = None
             if possessor_actor_id is not None:
@@ -425,14 +443,19 @@ class WorldService:
                 entity_type="item",
                 canonical_name=name,
                 importance_tier=importance_tier,
+                metadata_=metadata or {},
             )
             self.session.add(entity)
             await self.session.flush()
+            snapshot: dict[str, Any] = {"equipped": equipped and possessor_entity is not None}
+            if concealment_difficulty:
+                snapshot["concealment_difficulty"] = concealment_difficulty
             item = Item(
                 entity_id=entity.id,
                 template_key=template_key,
-                item_type=item_type,
-                mechanical_snapshot={"equipped": equipped and possessor_entity is not None},
+                item_type="document" if document is not None else item_type,
+                mechanical_snapshot=snapshot,
+                concealed=concealed,
                 owner_entity_id=owner_entity or possessor_entity,
                 possessor_entity_id=possessor_entity,
                 location_id=location_id if possessor_entity is None else None,
@@ -457,6 +480,57 @@ class WorldService:
             )
             entity.created_event_id = event.id
             item.created_event_id = event.id
+            if document is not None:
+                text = str(document["text"])
+                self.session.add(
+                    Document(
+                        item_id=item.id,
+                        original_text=text,
+                        content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                        author_entity_id=document.get("author_entity_id"),
+                        creation_tick=document.get("creation_tick"),
+                        language=document.get("language", "common"),
+                        cipher=document.get("cipher"),
+                        conveys=list(document.get("conveys", [])),
+                    )
+                )
+                await self.session.flush()
+        return item
+
+    async def destroy_item(
+        self,
+        h: CampaignHandle,
+        item_id: uuid.UUID,
+        *,
+        reason: str = "",
+        tx: EventTransaction | None = None,
+        cause: Event | None = None,
+    ) -> Item:
+        """Remove an item from the world. Its history stays; the row records the destroying
+        event (world-memory §15: unique items keep a history)."""
+        if tx is None:
+            async with self._tx(h) as tx2:
+                return await self.destroy_item(h, item_id, reason=reason, tx=tx2, cause=cause)
+        item = await self._get(Item, item_id, what="item")
+        if item.destroyed_event_id is not None:
+            return item
+        event = await tx.emit(
+            ev.ItemDestroyed(item_id=item.id, reason=reason),
+            cause=cause,
+            entities=[(item.entity_id, "subject")],
+        )
+        item.destroyed_event_id = event.id
+        item.possessor_entity_id, item.location_id, item.zone_key = None, None, None
+        self.session.add(
+            ItemHistory(
+                item_id=item.id,
+                event_id=event.id,
+                change_type="destroyed",
+                payload={"reason": reason},
+            )
+        )
+        ent = await self._get(Entity, item.entity_id, what="entity")
+        ent.lifecycle_state = "destroyed"
         return item
 
     # -- scenes --------------------------------------------------------------------------------
@@ -557,13 +631,31 @@ class WorldService:
 
     # -- time ----------------------------------------------------------------------------------
 
-    async def advance_time(self, h: CampaignHandle, seconds: int, *, reason: str = "wait") -> Event:
+    async def advance_time(
+        self,
+        h: CampaignHandle,
+        seconds: int,
+        *,
+        reason: str = "wait",
+        scene_id: uuid.UUID | None = None,
+    ) -> Event:
         async with self._tx(h) as tx:
-            return await self._advance_clock(tx, seconds, reason=reason)
+            scene = await self.session.get(Scene, scene_id) if scene_id else None
+            return await self._advance_clock(tx, seconds, reason=reason, scene=scene)
 
     async def _advance_clock(
-        self, tx: EventTransaction, seconds: int, *, reason: str, cause: Event | None = None
+        self,
+        tx: EventTransaction,
+        seconds: int,
+        *,
+        reason: str,
+        cause: Event | None = None,
+        scene: Scene | None = None,
     ) -> Event:
+        scene_ = scene
+        """`scene` is the scene whose play caused the advance (an action, a conversation,
+        travel): it always follows the clock. Live scenes (a human participant) follow too;
+        other scenes lag until a reunion fast-forwards them (time-accounting §3–§5)."""
         if seconds <= 0:
             raise WorldError("time only moves forward")
         from_tick = tx.clock.current_tick
@@ -574,7 +666,9 @@ class WorldService:
             cause=cause,
         )
         tx.clock.current_tick = to_tick
-        # The live scene (if any) follows the clock. Offscreen catch-up is Milestone 08.
+        # Live scenes (a human-controlled participant) follow the clock; offscreen scenes keep
+        # their local_tick behind and are fast-forwarded at reunion (time-accounting §3–§5;
+        # the bounded catch-up call belongs to the orchestrator, deterministic systems to 08).
         for scene in (
             (
                 await self.session.execute(
@@ -586,10 +680,95 @@ class WorldService:
             .scalars()
             .all()
         ):
-            if scene.local_tick == from_tick:
+            if scene.local_tick == from_tick and (
+                (scene_ is not None and scene.id == scene_.id) or await self._has_human(scene.id)
+            ):
                 scene.local_tick = to_tick
                 tx.touch_scene(scene)
+        # scheduled events whose tick has come fire inside this transaction
+        from app.services.schedule import ScheduleService
+
+        await ScheduleService(self.session).fire_due(tx, to_tick)
         return event
+
+    async def _has_human(self, scene_id: uuid.UUID) -> bool:
+        rows = (
+            await self.session.execute(
+                select(ActorController.controller_type)
+                .join(SceneParticipant, SceneParticipant.actor_id == ActorController.actor_id)
+                .where(
+                    SceneParticipant.scene_id == scene_id,
+                    SceneParticipant.left_event_id.is_(None),
+                    ActorController.valid_until_event_id.is_(None),
+                )
+            )
+        ).scalars()
+        return any(c == "human" for c in rows)
+
+    # -- factions and parties ------------------------------------------------------------------
+
+    async def create_faction(
+        self,
+        h: CampaignHandle,
+        name: str,
+        *,
+        description: str | None = None,
+        resources: dict[str, Any] | None = None,
+        capabilities: dict[str, Any] | None = None,
+        members: dict[uuid.UUID, str] | None = None,
+        public: bool = False,
+    ) -> Faction:
+        """A faction and its memberships (database-schema §5). `public=False` means its
+        existence is not general knowledge: nothing here creates beliefs for anyone."""
+        async with self._tx(h) as tx:
+            f = Faction(
+                campaign_id=h.campaign_id,
+                name=name,
+                description=description,
+                resources=resources or {},
+                capabilities={**(capabilities or {}), "public": public},
+            )
+            self.session.add(f)
+            await self.session.flush()
+            event = await tx.emit(
+                ev.FactionCreated(
+                    faction_id=f.id, name=name, member_actor_ids=list((members or {}).keys())
+                )
+            )
+            f.created_event_id = event.id
+            for actor_id, role in (members or {}).items():
+                await self._get(Actor, actor_id, what="actor")
+                self.session.add(
+                    FactionMembership(
+                        faction_id=f.id, actor_id=actor_id, role=role, joined_event_id=event.id
+                    )
+                )
+        return f
+
+    async def create_party(
+        self,
+        h: CampaignHandle,
+        name: str,
+        member_actor_ids: list[uuid.UUID],
+        *,
+        shared_resources: dict[str, Any] | None = None,
+    ) -> Party:
+        async with self._tx(h) as tx:
+            party = Party(
+                campaign_id=h.campaign_id, name=name, shared_resources=shared_resources or {}
+            )
+            self.session.add(party)
+            await self.session.flush()
+            event = await tx.emit(
+                ev.PartyCreated(party_id=party.id, name=name, member_actor_ids=member_actor_ids)
+            )
+            party.created_event_id = event.id
+            for aid in member_actor_ids:
+                await self._get(Actor, aid, what="actor")
+                self.session.add(
+                    PartyMembership(party_id=party.id, actor_id=aid, joined_event_id=event.id)
+                )
+        return party
 
     # -- reads ---------------------------------------------------------------------------------
 

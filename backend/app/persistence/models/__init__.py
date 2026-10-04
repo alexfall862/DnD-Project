@@ -46,6 +46,7 @@ from app.persistence.models.mechanics import (
     ResourceStateRow,
 )
 from app.persistence.models.memory import Memory, MemorySource
+from app.persistence.models.mystery import Clue, ClueDiscovery, Mystery, MysteryTruthFact
 from app.persistence.models.projections import EncyclopediaEntry, JournalEntry
 from app.persistence.models.psychology import (
     ActorAIProfile,
@@ -85,6 +86,10 @@ __all__ = [
     "TurnMetrics",
     "Memory",
     "MemorySource",
+    "Mystery",
+    "MysteryTruthFact",
+    "Clue",
+    "ClueDiscovery",
     "Belief",
     "Claim",
     "EntityIdentityKnowledge",

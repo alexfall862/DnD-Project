@@ -69,4 +69,4 @@ Notes / deviations:
   the Intent Interpreter (06a) and Claim Extractor (06b) will feed the same `utter()`.
 - Detection of hidden actors (`scene.state.detected`) is recorded but nothing sets it yet;
   Awareness-vs-Stealth detection lands with social/exploration actions in 06a.
-- Clue discovery by testimony (c&k §6) waits for `clues` (Milestone 07).
+- Clue discovery by testimony (c&k §6) landed with `clues` in Milestone 07 (`SpeechService` → `MysteryService.discover_by_testimony`).

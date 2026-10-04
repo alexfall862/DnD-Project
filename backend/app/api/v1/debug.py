@@ -178,15 +178,28 @@ async def events(
 
 @router.post("/seed-demo", dependencies=[Depends(require_debug)])
 async def seed_demo(
-    request: Request, session: AsyncSession = Depends(get_session), name: str = "frostbridge-tavern"
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    name: str | None = None,
+    fixture: str = "frostbridge",
 ) -> dict[str, Any]:
-    """Create the Red Lantern tavern campaign (Milestone 07 replaces this with the full
-    Frostbridge seed). Returns the symbolic-name → id map the harness needs."""
-    from app.seeds.frostbridge_tavern import seed_tavern
+    """Create a demo campaign: the full Frostbridge fixture (default) or the small Red
+    Lantern scene (`fixture=tavern`). Returns the symbolic-name → id map the harness needs."""
+    engine_version = request.app.state.settings.engine_version
+    if fixture == "tavern":
+        from app.seeds.frostbridge_tavern import seed_tavern
 
-    w = await seed_tavern(
-        session, name=name, engine_version=request.app.state.settings.engine_version
-    )
+        w = await seed_tavern(
+            session, name=name or "frostbridge-tavern", engine_version=engine_version
+        )
+    elif fixture == "frostbridge":
+        from app.seeds.frostbridge import seed_frostbridge
+
+        w = await seed_frostbridge(
+            session, name=name or "frostbridge", engine_version=engine_version
+        )
+    else:
+        raise NotFound(f"unknown fixture {fixture!r}")
     await session.commit()
     return w.summary()
 
@@ -325,8 +338,8 @@ async def end_scene(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Scene end = the main memory checkpoint (06c). Debug-only until scene transitions arrive
-    with Milestone 07."""
+    """Scene end = the main memory checkpoint (06c). Travel between locations (07) ends
+    emptied scenes by itself; this endpoint ends one explicitly (rest, leaving town)."""
     from app.services.orchestrator import SessionOrchestrator
     from app.services.world import CampaignHandle
 

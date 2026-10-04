@@ -16,6 +16,13 @@ ACTION_MAP = {
     "run": "action.move",
     "approach": "action.move",
     "head": "action.move",
+    "travel": "action.move",
+    "enter": "action.move",
+    "leave": "action.move",
+    "visit": "action.move",
+    "go_to": "action.move",
+    "head_to": "action.move",
+    "walk_to": "action.move",
     "sprint": "action.sprint",
     "engage": "action.engage",
     "close": "action.engage",
@@ -60,6 +67,7 @@ SPEECH_TYPES = {
     "greet",
 }
 FREE_TYPES = {"look", "observe", "watch", "listen", "think", "consider", "none", "nothing"}
+READ_TYPES = {"read", "study", "peruse", "read_document"}
 
 
 def action_key_for(word: str) -> str | None:

@@ -1,7 +1,8 @@
 """Terminal play harness (Milestone 06d; api-contracts §9–§12, human-visibility §2,
 turn-budget §6–§7).
 
-    uv run python -m app.cli.play --new            # seed the Red Lantern and play as Alex
+    uv run python -m app.cli.play --new            # seed Frostbridge and play as Alex
+    uv run python -m app.cli.play --new --fixture tavern   # the small Red Lantern scene
     uv run python -m app.cli.play --campaign <id>  # resume
 
 It uses the HTTP API only — the same boundary the browser client will use — and never parses
@@ -60,8 +61,8 @@ class Harness:
 
     # -- setup ------------------------------------------------------------------------------
 
-    async def new_campaign(self, *, actor: str | None = None) -> None:
-        r = await self.client.post(f"{API}/debug/seed-demo")
+    async def new_campaign(self, *, actor: str | None = None, fixture: str = "frostbridge") -> None:
+        r = await self.client.post(f"{API}/debug/seed-demo", params={"fixture": fixture})
         self._check(r, "seed-demo (needs DEBUG_MODE=true)")
         seed = r.json()
         self.campaign_id = seed["campaign_id"]
@@ -410,7 +411,13 @@ async def amain(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="AI TTRPG terminal harness (HTTP client)")
     ap.add_argument("--base-url", default="http://127.0.0.1:8000")
     ap.add_argument("--campaign", help="campaign id to resume")
-    ap.add_argument("--new", action="store_true", help="seed a new Red Lantern campaign")
+    ap.add_argument("--new", action="store_true", help="seed a new Frostbridge campaign")
+    ap.add_argument(
+        "--fixture",
+        choices=("frostbridge", "tavern"),
+        default="frostbridge",
+        help="with --new: the full Frostbridge world (default) or the small Red Lantern scene",
+    )
     ap.add_argument("--actor", help="human actor name to play (default: the first human)")
     ap.add_argument("--script", help="file with one command per line (replay)")
     args = ap.parse_args(argv)
@@ -418,7 +425,7 @@ async def amain(argv: list[str] | None = None) -> int:
         h = Harness(client)
         try:
             if args.new or not args.campaign:
-                await h.new_campaign(actor=args.actor)
+                await h.new_campaign(actor=args.actor, fixture=args.fixture)
             else:
                 await h.load_campaign(args.campaign, actor=args.actor)
             await h.show_scene()

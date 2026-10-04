@@ -103,3 +103,15 @@ equipment:
   - key: item.travel_supplies
     name: Travel supplies
     slot: gear
+  - key: item.document
+    name: Document
+    slot: gear
+    tags: [paper, flammable]
+  - key: item.satchel
+    name: Satchel
+    slot: gear
+    tags: [container]
+  - key: item.coin_purse
+    name: Coin purse
+    slot: gear
+    tags: [currency]

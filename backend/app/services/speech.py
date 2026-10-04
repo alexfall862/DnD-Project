@@ -38,6 +38,7 @@ from app.persistence.repositories.objective import ObjectiveWorldRepository
 from app.persistence.repositories.perspective import PerspectiveRepository
 from app.services.events import EventTransaction
 from app.services.knowledge import KnowledgeService
+from app.services.mystery import MysteryService
 from app.services.world import CampaignHandle, WorldError
 
 DEFAULT_SENSES = {"sense:vision", "sense:hearing"}
@@ -89,6 +90,7 @@ class SpeechService:
         self.objective = ObjectiveWorldRepository(session)
         self.perspective = PerspectiveRepository(session)
         self.knowledge = KnowledgeService(session)
+        self.mystery = MysteryService(session)
 
     # -- loading -------------------------------------------------------------------------------
 
@@ -373,6 +375,9 @@ class SpeechService:
                         claim_id=c.id,
                     )
                     observations.append(obs)
+                    # naming: the speaker's name for a referenced entity reaches the listener
+                    # (identity knowledge moves by communication like any other knowledge)
+                    await self._convey_names(tx, h, speaker_id, rid, r.entity.id, prop, event)
                     # the recipient knows the speaker said it
                     await self.knowledge.store_belief(
                         tx,
@@ -405,7 +410,44 @@ class SpeechService:
                         source_actor_id=speaker_id,
                     )
                     existing = await self.knowledge.existing_beliefs(rid)
+                    # c&k §6: a Claim conveying a clue's supported fact discovers the clue
+                    if fact_id is not None and it.stance == "asserts_true":
+                        await self.mystery.discover_by_testimony(
+                            tx,
+                            fact_id=fact_id,
+                            recipient_actor_id=rid,
+                            claim_id=c.id,
+                            fidelity=it.fidelity,
+                            cause=event,
+                        )
         return SpeechResult(event, claims, recipients, observations, unknown)
+
+    async def _convey_names(
+        self,
+        tx: EventTransaction,
+        h: CampaignHandle,
+        speaker_id: uuid.UUID,
+        recipient_id: uuid.UUID,
+        recipient_entity_id: uuid.UUID,
+        prop: Proposition,
+        event: Event,
+    ) -> None:
+        speaker_ident = None
+        for raw in (prop.subject, prop.object):
+            eid = _uuid_or_none(raw)
+            if eid is None or eid == recipient_entity_id:
+                continue  # nobody learns their own name from a stranger
+            if speaker_ident is None:
+                speaker_ident = await self.perspective.identity_knowledge(speaker_id)
+            row = speaker_ident.get(eid)
+            if row is None:
+                continue
+            recipient_ident = await self.perspective.identity_knowledge(recipient_id)
+            if eid in recipient_ident:
+                continue
+            await self.knowledge.learn_identity(
+                h, recipient_id, eid, row.known_name, tx=tx, cause=event
+            )
 
     def _obs(
         self,

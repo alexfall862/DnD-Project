@@ -392,6 +392,76 @@ Milestone 11 (stress) with per-actor partitioning or iterative index scans if ne
   `narration_delta` tokens straight to stdout when its sink is `print`; any other sink (tests,
   logs) receives the joined narration once, so output lines stay meaningful.
 
+### Frostbridge fixture (07) — implementation decisions (2026-10-04)
+
+- **07/08 boundary.** Milestone 07's required scenario "time advance / evidence destruction"
+  needs scheduled events to fire, which Milestone 08 owns. Decision: the *deterministic* part
+  lands in 07 (`ScheduleService`: schedule, fire when the clock passes `scheduled_tick`,
+  revalidate prerequisites against current state, handlers `fact.establish`, `clue.destroy`,
+  `plan.advance`, `location.state`); anything that needs the World Simulator stays `pending`
+  (Day +5 shipment is `faction.shipment_departure`, untouched until 08). The background worker,
+  faction/plan reasoning and deterministic catch-up systems remain 08.
+- **Offscreen catch-up is bounded to one decision and to AI party members.** time-accounting §4
+  in 07 form: when an offscreen scene lags the clock by more than 10 minutes, at most one AI
+  decision (intentions only, full mechanics) for its most important AI *party member*, then
+  `scene.caught_up`; at most two scenes per live turn; nothing reaches the human. NPC-only
+  scenes (Mira and Renn waiting in the tavern) get no call until 08 adds plan steps and
+  triggers, so idle rooms cost nothing.
+- **Live scene = a scene with a human-controlled participant.** `_advance_clock` moves only
+  live scenes' `local_tick`; offscreen scenes lag and are fast-forwarded when someone arrives
+  (`scene.caught_up` inside the travel transaction). Reunion joins the active scene at the
+  destination; `merged_from` is recorded only when a whole scene arrived (an emptied scene ends
+  in the same transaction). No Observations or Claims are created by arriving except plain
+  arrival observations ("Tomas arrives at Guard House").
+- **Concealed items and search.** `items.concealed` + `concealment_difficulty`; a successful
+  `action.search` of a zone reveals the concealed items there whose difficulty the total meets
+  (`item.revealed`, per-observer Observations). Physical clues on a revealed object are
+  evidence (`clue_discoveries route=physical`, belief `known 1.0`, belief-update §3); document
+  clues are only *found* (`route=document fidelity=partial`) — reading stores the content.
+- **Documents.** `WorldService.create_item(document=…)` creates the immutable `documents` row
+  in the item's transaction (sha256 `content_hash`). `DocumentService.read` is an Observation
+  (`read_document`) whose Claims come from the stored `conveys[]` with the author as speaker
+  (no Claims without an actor author; beliefs still form at `0.85 × trust`, unsigned 0.7).
+  A `conveys` item of kind `identity` teaches the reader a name (the gate notice names Oric).
+- **Names move by communication.** A Claim about an entity conveys the speaker's name for it
+  to listeners who have none (`SpeechService._convey_names`); nobody learns their own name
+  this way. This is how the party learns "Captain Renn" from Mira without a scripted intro.
+- **Testimony discovers clues.** c&k §6: when a Claim conveying a clue's supported fact reaches
+  a PC, `clue_discoveries(route=testimony, claim_id, fidelity)` is recorded for every intact
+  clue supporting that fact (partial fidelity never links the fact row to the belief).
+- **Mystery lock is structural.** `MysteryService.replace_truth` raises `MysteryLockedError`
+  while `solution_locked`; `routes_remaining().solvable` is the redundancy check the seed and
+  the Day +3 destruction test use.
+- **NPC autonomy defaults to autonomous.** The `ask` defaults protect the human's party from
+  their companions' big decisions; an NPC without a profile has nobody to ask (a thief may
+  surrender). Before this, `action.surrender` for a thief paused on the gate forever.
+- **Fleeing is a route.** Fallback tactics now disengage first, head for the nearest exit zone
+  and `flee` through it when in reach; spaces without exits keep the old behaviour.
+- **An encounter can end on any action.** `encounter.ended` is emitted from the action commit
+  when the status flips (last foe surrenders/falls), not only on an explicit turn advance;
+  this is what fires the combat-end memory checkpoint.
+- **Completeness heuristic counts referenced records' entities.** A `fact_ref`/`belief_ref`
+  item references its fact's subject/object; previously only `proposition` items did, so a
+  partial reveal about "the captain" always paid for a Claim Extractor call.
+- **Seeding is one unit of work.** `services.events.unit_of_work` makes EventTransactions
+  flush instead of commit; the seed commits once after `verify()` and a failure rolls back
+  everything (the campaign row, created before the unit of work, is removed). Never used on
+  the play path.
+- **Persistent environmental consequences** use a registered primitive, `alter_feature`
+  (zone feature text replaced/removed in the scene space, persisted with the scene state), so
+  "a heavy shelf toppled across the floor" outlives the encounter without parsing prose.
+- **§23 generated artifact** is a fixed, validated `mechanical_definitions` row in fixture
+  mode (`validate_artifact`: ≤ 1 passive + 1 activated effect, registered primitives, no
+  teleport/resurrection/permanent attribute increase). The World Author call for it belongs
+  to Milestone 09's generation pipeline.
+- **The seed is Python, not YAML.** §40 recommends a YAML directory; the seed stays declarative
+  Python tables (`LOCATIONS`, `SPACES`, `EDGES`, builds, behaviour) with stable symbolic keys,
+  which the tests and harness already consume. Revisit with worldgen (09) if authored content
+  needs non-programmer editing.
+- **Known gap:** NPC Actor output has no speech channel, so Mira's private reveal is spoken
+  aloud (everyone present hears it). Adding `speech_channel` to `NPCActorOut` is a contract
+  change for the design-iteration backlog.
+
 ### Pending
 - **2026-10-03, later:** A9 was updated after the spike. The project now serves **GLM-4.5-Air**
   as `ttrpg/local-general` (explicit model name; A9 never substitutes; 409 = not loaded, wait
