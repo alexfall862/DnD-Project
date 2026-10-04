@@ -1,0 +1,105 @@
+# §7 armour, §10 weapons. Attribute damage contribution is explicitly tunable (floor(Might/2) here).
+equipment:
+  - key: item.knife
+    name: Knife
+    slot: weapon
+    melee: true
+    damage: 1d4
+    attack_check: check.melee_attack
+    attribute_bonus: "floor(attr.might / 2)"
+    range_bands: { engaged: 0 }
+    tags: [light, concealable]
+  - key: item.dagger
+    name: Dagger
+    slot: weapon
+    melee: true
+    damage: 1d4
+    attack_check: check.melee_attack
+    attribute_bonus: "floor(attr.might / 2)"
+    range_bands: { engaged: 0, close: -2 }   # thrown
+    tags: [light]
+  - key: item.sword
+    name: Sword
+    slot: weapon
+    melee: true
+    damage: 1d8
+    attack_check: check.melee_attack
+    attribute_bonus: "floor(attr.might / 2)"
+    range_bands: { engaged: 0 }
+  - key: item.great_axe
+    name: Great Axe
+    slot: weapon
+    melee: true
+    two_handed: true
+    damage: 1d10
+    attack_check: check.melee_attack
+    attribute_bonus: "floor(attr.might / 2)"
+    range_bands: { engaged: 0 }
+  - key: item.club
+    name: Club
+    slot: weapon
+    melee: true
+    damage: 1d6
+    attack_check: check.melee_attack
+    attribute_bonus: "floor(attr.might / 2)"
+    range_bands: { engaged: 0 }
+  - key: item.bow
+    name: Bow
+    slot: weapon
+    melee: false
+    two_handed: true
+    damage: 1d8
+    attack_check: check.ranged_attack
+    range_bands: { engaged: null, close: 0, near: 0, far: -2, distant: -4 }
+  - key: item.pistol
+    name: Pistol
+    slot: weapon
+    melee: false
+    damage: 1d8
+    attack_check: check.ranged_attack
+    range_bands: { engaged: -2, close: 0, near: 0, far: -4, distant: null }
+  - key: item.rifle
+    name: Rifle
+    slot: weapon
+    melee: false
+    two_handed: true
+    damage: 1d10
+    attack_check: check.ranged_attack
+    range_bands: { engaged: -4, close: -2, near: 0, far: 0, distant: -2 }
+  - key: item.unarmed
+    name: Unarmed strike
+    slot: weapon
+    melee: true
+    damage: 1d2
+    attack_check: check.melee_attack
+    attribute_bonus: "floor(attr.might / 2)"
+    range_bands: { engaged: 0 }
+    tags: [natural]
+  - key: item.light_armor
+    name: Light armour
+    slot: armor
+    modifiers:
+      - { target: stat.defense, op: add, value: 1 }
+  - key: item.medium_armor
+    name: Medium armour
+    slot: armor
+    modifiers:
+      - { target: stat.defense, op: add, value: 2 }
+  - key: item.heavy_armor
+    name: Heavy armour
+    slot: armor
+    modifiers:
+      - { target: stat.defense, op: add, value: 3 }
+      - { target: stat.defense_agility, op: set, value: "min(attr.agility, 5)", note: "Agility capped at 5" }
+  - key: item.shield
+    name: Shield
+    slot: shield
+    modifiers:
+      - { target: stat.defense, op: add, value: 1 }
+  - key: item.oil_lantern
+    name: Oil lantern
+    slot: gear
+    tags: [light_source, flammable]
+  - key: item.travel_supplies
+    name: Travel supplies
+    slot: gear

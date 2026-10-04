@@ -76,9 +76,7 @@ async def test_db_available(test_settings: Settings) -> bool:
 @pytest.fixture
 def require_test_db(test_db_available: bool, test_settings: Settings) -> None:
     if not test_db_available:
-        pytest.skip(
-            f"test database unreachable at {test_settings.database_url} (run `make db-up`)"
-        )
+        pytest.skip(f"test database unreachable at {test_settings.database_url} (run `make db-up`)")
 
 
 @pytest.fixture(scope="session")

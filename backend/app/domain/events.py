@@ -7,7 +7,7 @@ on the row); no upcasters exist before v0.1, so a payload change means `make res
 from __future__ import annotations
 
 import uuid
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -105,6 +105,135 @@ class TimeAdvanced(EventPayload):
     reason: str
 
 
+class MechanicEvent(EventPayload):
+    """Base for engine-mechanics events emitted by the action resolver. Payloads carry the
+    resolver's structured detail; extra keys are allowed because each mechanic has its own."""
+
+    model_config = ConfigDict(extra="allow")
+    actor: str  # actor UUID string
+
+
+class ActionResolved(MechanicEvent):
+    event_type: ClassVar[str] = "action.resolved"
+    action: str
+    target: str | None = None
+    status: str
+    time_cost_seconds: int = 0
+    action_id: str | None = None
+
+
+class AttackRolled(MechanicEvent):
+    event_type: ClassVar[str] = "attack.rolled"
+    target: str
+    weapon: str
+    total: int
+    versus: int | None = None
+    success: bool | None = None
+    degree: str | None = None
+    roll: dict[str, Any] = Field(default_factory=dict)
+
+
+class DamageDealt(MechanicEvent):
+    event_type: ClassVar[str] = "damage.dealt"
+    target: str
+    amount: int
+    damage_type: str
+    remaining: int
+
+
+class ActorIncapacitated(MechanicEvent):
+    event_type: ClassVar[str] = "actor.incapacitated"
+    by: str | None = None
+
+
+class ActorRepositioned(MechanicEvent):
+    event_type: ClassVar[str] = "actor.repositioned"
+    from_zone: str
+    to_zone: str
+    disengaged_from: list[str] = Field(default_factory=list)
+
+
+class ActorEngaged(MechanicEvent):
+    event_type: ClassVar[str] = "actor.engaged"
+    target: str
+
+
+class ActorDisengaged(MechanicEvent):
+    event_type: ClassVar[str] = "actor.disengaged"
+    unsafe: bool = False
+
+
+class ActorTookCover(MechanicEvent):
+    event_type: ClassVar[str] = "actor.took_cover"
+    level: str
+
+
+class ActorRested(MechanicEvent):
+    event_type: ClassVar[str] = "actor.rested"
+    kind: str
+
+
+class CheckRolled(MechanicEvent):
+    event_type: ClassVar[str] = "check.rolled"
+    action: str
+    check: str
+    total: int
+    versus: int | None = None
+    success: bool | None = None
+    degree: str | None = None
+
+
+class ItemPickedUp(MechanicEvent):
+    event_type: ClassVar[str] = "item.picked_up"
+    item: str
+    zone: str
+
+
+class ItemDropped(MechanicEvent):
+    event_type: ClassVar[str] = "item.dropped"
+    item: str
+    zone: str
+
+
+class ActorFled(MechanicEvent):
+    event_type: ClassVar[str] = "actor.fled"
+    via: str
+
+
+class ActorSurrendered(MechanicEvent):
+    event_type: ClassVar[str] = "actor.surrendered"
+
+
+class EncounterStarted(EventPayload):
+    event_type: ClassVar[str] = "encounter.started"
+    scene_id: uuid.UUID
+    order: list[str]
+    sides: dict[str, str]
+
+
+class EncounterRoundEnded(EventPayload):
+    event_type: ClassVar[str] = "encounter.round_ended"
+    scene_id: uuid.UUID
+    round: int
+
+
+class EncounterEnded(EventPayload):
+    event_type: ClassVar[str] = "encounter.ended"
+    scene_id: uuid.UUID
+    standing: list[str]
+    rounds: int
+
+
+class ItemCreated(EventPayload):
+    event_type: ClassVar[str] = "item.created"
+    item_id: uuid.UUID
+    entity_id: uuid.UUID
+    name: str
+    template_key: str | None = None
+    possessor_actor_id: uuid.UUID | None = None
+    location_id: uuid.UUID | None = None
+
+
 PAYLOAD_TYPES: dict[str, type[EventPayload]] = {
     cls.event_type: cls
     for cls in (
@@ -119,6 +248,24 @@ PAYLOAD_TYPES: dict[str, type[EventPayload]] = {
         SceneParticipantLeft,
         SceneEnded,
         TimeAdvanced,
+        ActionResolved,
+        AttackRolled,
+        DamageDealt,
+        ActorIncapacitated,
+        ActorRepositioned,
+        ActorEngaged,
+        ActorDisengaged,
+        ActorTookCover,
+        ActorRested,
+        CheckRolled,
+        ItemPickedUp,
+        ItemDropped,
+        ActorFled,
+        ActorSurrendered,
+        EncounterStarted,
+        EncounterRoundEnded,
+        EncounterEnded,
+        ItemCreated,
     )
 }
 

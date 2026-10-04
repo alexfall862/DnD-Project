@@ -12,6 +12,8 @@ files:
   - checks.yaml
   - conditions.yaml
   - traits.yaml
+  - equipment.yaml
+  - actions.yaml
 
 # §2 difficulty scale
 difficulty_scale:

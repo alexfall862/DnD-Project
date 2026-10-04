@@ -22,9 +22,47 @@ from app.persistence.models.event import (
     TranscriptMessage,
     TranscriptRecipient,
 )
+from app.persistence.models.mechanics import (
+    ConditionInstanceRow,
+    Document,
+    Item,
+    ItemHistory,
+    ResourceStateRow,
+)
+from app.persistence.models.rules import (
+    Action,
+    ActionStep,
+    Intent,
+    MechanicalDefinition,
+    PendingClarification,
+    ReactionEligibleActor,
+    ReactionWindowRecord,
+    ResolutionTraceRecord,
+    Roll,
+    RuleModule,
+    RulesetRecord,
+    RulingPrecedent,
+)
 from app.persistence.models.scene import Scene, SceneParticipant
 
 __all__ = [
+    "Action",
+    "ActionStep",
+    "ConditionInstanceRow",
+    "Document",
+    "Intent",
+    "Item",
+    "ItemHistory",
+    "MechanicalDefinition",
+    "PendingClarification",
+    "ReactionEligibleActor",
+    "ReactionWindowRecord",
+    "ResolutionTraceRecord",
+    "ResourceStateRow",
+    "Roll",
+    "RuleModule",
+    "RulesetRecord",
+    "RulingPrecedent",
     "Actor",
     "ActorController",
     "Base",

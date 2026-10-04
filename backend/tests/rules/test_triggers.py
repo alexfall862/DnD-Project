@@ -46,6 +46,14 @@ def test_mutually_recursive_runtime_triggers_halt_at_budget(tmp_path):
         conditions={
             "conditions": [
                 {"key": "condition.incapacitated", "name": "Incapacitated"},
+                {"key": "condition.surrendered", "name": "Surrendered"},
+                {"key": "condition.fleeing", "name": "Fleeing"},
+                {
+                    "key": "condition.in_cover",
+                    "name": "In cover",
+                    "stacking": "intensity",
+                    "max_intensity": 2,
+                },
                 {
                     "key": "condition.feedback",
                     "name": "Feedback",

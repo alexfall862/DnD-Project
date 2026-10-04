@@ -1,0 +1,156 @@
+# §8–§13 actions. cost keys: major/movement/reaction/free (booleans) and resource.* amounts.
+# requirements are safe expressions over ctx.* facts the resolver supplies (see engine/actions.py).
+actions:
+  - key: action.attack
+    name: Attack
+    category: attack
+    cost: { major: true }
+    time_cost_seconds: 6
+    targeting: { type: actor, hostile_only: true }
+    requirements: ["ctx.has_weapon"]
+    resolution: { kind: attack, weapon_slot: weapon }
+  - key: action.move
+    name: Move
+    description: "change one distance step (zone or engagement)"
+    category: movement
+    cost: { movement: true }
+    time_cost_seconds: 6
+    targeting: { type: zone, requires_los: false }
+    resolution: { kind: move, movement_steps: 1 }
+  - key: action.sprint
+    name: Sprint
+    description: "two distance steps; costs the Major Action or 2 Stamina"
+    category: movement
+    cost: { movement: true, major: true }
+    time_cost_seconds: 6
+    targeting: { type: zone, requires_los: false }
+    resolution: { kind: move, movement_steps: 2 }
+  - key: action.engage
+    name: Engage
+    description: "close to melee with an actor in your zone"
+    category: movement
+    cost: { movement: true }
+    time_cost_seconds: 6
+    targeting: { type: actor, bands: [close] }
+    resolution: { kind: engage }
+  - key: action.disengage
+    name: Disengage
+    description: "leave melee; unsafe unless you spend the Major Action to withdraw carefully"
+    category: movement
+    cost: { movement: true }
+    time_cost_seconds: 6
+    targeting: { type: none }
+    requirements: ["ctx.is_engaged"]
+    resolution: { kind: disengage }
+    unsafe_movement: true
+  - key: action.withdraw
+    name: Withdraw
+    description: "disengage carefully; no opportunity attack"
+    category: movement
+    cost: { movement: true, major: true }
+    time_cost_seconds: 6
+    targeting: { type: none }
+    requirements: ["ctx.is_engaged"]
+    resolution: { kind: disengage }
+    unsafe_movement: false
+  - key: action.take_cover
+    name: Take cover
+    category: defense
+    cost: { movement: true }
+    time_cost_seconds: 6
+    targeting: { type: none }
+    requirements: ["ctx.cover_available"]
+    resolution: { kind: take_cover }
+  - key: action.defend
+    name: Defend
+    description: "Reaction: +2 Defense against one attack"
+    category: defense
+    cost: { reaction: true }
+    time_cost_seconds: 0
+    targeting: { type: self }
+    reaction_trigger: attacked
+    resolution:
+      kind: defend
+      effects:
+        - { type: modify_check, params: { check: check.*, op: add, amount: 0 } }   # placeholder; defend applies +2 Defense directly
+  - key: action.protect
+    name: Protect
+    description: "Reaction: intercept an attack on an engaged/adjacent ally"
+    category: defense
+    cost: { reaction: true }
+    time_cost_seconds: 0
+    targeting: { type: actor, ally_only: true, bands: [engaged, close] }
+    reaction_trigger: ally_attacked
+    resolution: { kind: protect }
+  - key: action.opportunity_attack
+    name: Opportunity attack
+    description: "Reaction: strike an enemy leaving your engagement unsafely"
+    category: attack
+    cost: { reaction: true }
+    time_cost_seconds: 0
+    targeting: { type: actor, hostile_only: true, bands: [engaged] }
+    requirements: ["ctx.has_melee_weapon"]
+    reaction_trigger: enemy_disengages
+    resolution: { kind: attack, weapon_slot: weapon }
+  - key: action.surrender
+    name: Surrender
+    category: social
+    cost: { major: true }
+    time_cost_seconds: 6
+    targeting: { type: none }
+    resolution:
+      kind: surrender
+      effects:
+        - { type: apply_condition, params: { condition: condition.surrendered } }
+  - key: action.flee
+    name: Flee
+    description: "leave the encounter via an exit zone; opposed Athletics vs pursuers is adjudicated by the encounter"
+    category: movement
+    cost: { major: true, movement: true }
+    time_cost_seconds: 6
+    targeting: { type: zone, requires_los: false }
+    resolution: { kind: flee }
+  - key: action.pick_up
+    name: Pick up
+    category: interaction
+    cost: { free: true }
+    time_cost_seconds: 10
+    targeting: { type: item, bands: [engaged, close] }
+    resolution: { kind: pickup }
+  - key: action.drop
+    name: Drop
+    category: interaction
+    cost: { free: true }
+    time_cost_seconds: 2
+    targeting: { type: item }
+    resolution: { kind: drop }
+  - key: action.search
+    name: Search
+    category: exploration
+    cost: { major: true }
+    time_cost_seconds: 300
+    targeting: { type: zone, requires_los: false }
+    resolution: { kind: check, check: check.core, skill: skill.investigation }
+  - key: action.short_rest
+    name: Short rest
+    category: downtime
+    cost: {}
+    time_cost_seconds: 3600
+    targeting: { type: none }
+    requirements: ["not ctx.in_combat"]
+    resolution: { kind: rest, rest_kind: short_rest }
+  - key: action.long_rest
+    name: Long rest
+    category: downtime
+    cost: {}
+    time_cost_seconds: 28800
+    targeting: { type: none }
+    requirements: ["not ctx.in_combat"]
+    resolution: { kind: rest, rest_kind: long_rest }
+  - key: action.wait
+    name: Wait
+    category: downtime
+    cost: { major: true }
+    time_cost_seconds: 6
+    targeting: { type: none }
+    resolution: { kind: wait }

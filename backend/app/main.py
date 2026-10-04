@@ -21,9 +21,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = make_engine(
-            settings.database_url, connect_timeout_s=settings.db_connect_timeout_s
-        )
+        engine = make_engine(settings.database_url, connect_timeout_s=settings.db_connect_timeout_s)
         app.state.settings = settings
         app.state.engine = engine
         app.state.session_factory = make_session_factory(engine)

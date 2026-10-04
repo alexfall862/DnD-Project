@@ -43,6 +43,51 @@ class ResourceState:
 
 
 @dataclass
+class ItemState:
+    """An item instance held by an actor (or lying in a scene zone, see actions.py).
+
+    `public` is what the holder knows; `hidden` is objective mechanics the holder has not
+    discovered (rules-engine §22). `to_dict()` omits `hidden` unless asked, so hidden fields
+    never reach a perspective by accident.
+    """
+
+    instance_key: str
+    def_key: str
+    name: str = ""
+    equipped: bool = True
+    quantity: int = 1
+    public: dict[str, Any] = field(default_factory=dict)
+    hidden: dict[str, Any] = field(default_factory=dict)
+    history: list[str] = field(default_factory=list)
+
+    def to_dict(self, include_hidden: bool = False) -> dict[str, Any]:
+        d = {
+            "instance_key": self.instance_key,
+            "def_key": self.def_key,
+            "name": self.name,
+            "equipped": self.equipped,
+            "quantity": self.quantity,
+            "public": self.public,
+        }
+        if include_hidden:
+            d["hidden"] = self.hidden
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ItemState:
+        return cls(
+            instance_key=d["instance_key"],
+            def_key=d["def_key"],
+            name=d.get("name", ""),
+            equipped=bool(d.get("equipped", True)),
+            quantity=int(d.get("quantity", 1)),
+            public=dict(d.get("public", {})),
+            hidden=dict(d.get("hidden", {})),
+            history=list(d.get("history", [])),
+        )
+
+
+@dataclass
 class Modifier:
     """A runtime modifier with provenance (traits/conditions are expanded into these)."""
 
@@ -55,6 +100,8 @@ class Modifier:
     note: str = ""
     expires_tick: int | None = None
     modifier_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    value_src: Any = 0
+    condition_src: Any = None
 
     @classmethod
     def from_def(cls, d: ModifierDef, source: str) -> Modifier:
@@ -66,6 +113,26 @@ class Modifier:
             condition=compile_expr(d.condition) if d.condition is not None else None,
             priority=d.priority,
             note=d.note,
+            value_src=d.value,
+            condition_src=d.condition,
+        )
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Modifier:
+        return cls(
+            target=d["target"],
+            op=d["op"],
+            value=compile_expr(d.get("value_src", 0)),
+            source=d.get("source", "effect"),
+            condition=compile_expr(d["condition_src"])
+            if d.get("condition_src") is not None
+            else None,
+            priority=int(d.get("priority", 0)),
+            note=d.get("note", ""),
+            expires_tick=d.get("expires_tick"),
+            modifier_id=d.get("modifier_id") or uuid.uuid4().hex[:12],
+            value_src=d.get("value_src", 0),
+            condition_src=d.get("condition_src"),
         )
 
 
@@ -79,7 +146,26 @@ class ActorState:
     conditions: list[ConditionInstance] = field(default_factory=list)
     temp_modifiers: list[Modifier] = field(default_factory=list)
     capabilities: set[str] = field(default_factory=set)
-    equipment: list[dict[str, Any]] = field(default_factory=list)  # Milestone 02b
+    equipment: list[ItemState] = field(default_factory=list)
+    tags: set[str] = field(default_factory=set)  # creature tags, e.g. "spirit", "undead"
+    importance: str = "standard"
+
+    def equipped(self, slot: str | None = None, ruleset: Ruleset | None = None) -> list[ItemState]:
+        items = [i for i in self.equipment if i.equipped]
+        if slot and ruleset:
+            items = [i for i in items if ruleset.equipment[i.def_key].slot == slot]
+        return items
+
+    def weapon(self, ruleset: Ruleset) -> ItemState:
+        """First equipped weapon, else an unarmed strike."""
+        for i in self.equipped("weapon", ruleset):
+            return i
+        return ItemState(
+            instance_key=f"{self.actor_key}:unarmed", def_key="item.unarmed", name="unarmed"
+        )
+
+    def item(self, instance_key: str) -> ItemState | None:
+        return next((i for i in self.equipment if i.instance_key == instance_key), None)
 
     def condition_intensity(self, key: str) -> int:
         return sum(c.intensity for c in self.conditions if c.key == key)
@@ -118,10 +204,21 @@ class ActorState:
         state = cls(
             actor_key=actor_key, attributes=attrs, skills=skills, traits=traits, capabilities=caps
         )
+        state.tags = set(profile.get("tags", []))
+        state.importance = profile.get("importance", "standard")
+        for raw in profile.get("equipment", []):
+            item = ItemState.from_dict(raw)
+            if item.def_key not in ruleset.equipment:
+                raise StatError(f"{actor_key}: unknown equipment {item.def_key!r}")
+            state.equipment.append(item)
+            if item.equipped:
+                caps |= set(ruleset.equipment[item.def_key].capabilities)
         for c in profile.get("conditions", []):
             if c["key"] not in ruleset.conditions:
                 raise StatError(f"{actor_key}: unknown condition {c['key']!r}")
             state.conditions.append(ConditionInstance(**c))
+        for m in profile.get("temp_modifiers", []):
+            state.temp_modifiers.append(Modifier.from_dict(m))
         calc = StatCalculator(ruleset)
         for k in ruleset.resources:
             given = profile.get("resources", {}).get(k)
@@ -134,12 +231,15 @@ class ActorState:
                 raise StatError(f"{actor_key}: unknown resource {k!r}")
         return state
 
-    def to_profile(self) -> dict[str, Any]:
+    def to_profile(self, include_hidden: bool = False) -> dict[str, Any]:
         return {
             "attributes": dict(sorted(self.attributes.items())),
             "skills": dict(sorted(self.skills.items())),
             "traits": sorted(self.traits),
             "capabilities": sorted(self.capabilities),
+            "tags": sorted(self.tags),
+            "importance": self.importance,
+            "equipment": [i.to_dict(include_hidden) for i in self.equipment],
             "resources": {k: {"current": r.current} for k, r in sorted(self.resources.items())},
             "conditions": [
                 {
@@ -161,6 +261,8 @@ class ActorState:
                     "note": m.note,
                     "expires_tick": m.expires_tick,
                     "modifier_id": m.modifier_id,
+                    "value_src": m.value_src,
+                    "condition_src": m.condition_src,
                 }
                 for m in self.temp_modifiers
             ],
@@ -221,6 +323,12 @@ class StatCalculator:
             d = self.rs.conditions.get(c.key)
             if d:
                 mods += [Modifier.from_def(m, source=c.key) for m in d.modifiers]
+        for item in state.equipment:
+            if not item.equipped:
+                continue
+            d = self.rs.equipment.get(item.def_key)
+            if d:
+                mods += [Modifier.from_def(m, source=item.def_key) for m in d.modifiers]
         mods += state.temp_modifiers
         return mods
 

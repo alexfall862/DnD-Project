@@ -67,9 +67,7 @@ class Location(Base):
     )
     parent_location_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("locations.id"))
     location_type: Mapped[str] = mapped_column(String(32), nullable=False, default="other")
-    detail_level: Mapped[str] = mapped_column(
-        String(32), nullable=False, server_default="outline"
-    )
+    detail_level: Mapped[str] = mapped_column(String(32), nullable=False, server_default="outline")
     properties: Mapped[dict[str, Any]] = jsonb_col()
     simulation_state: Mapped[dict[str, Any]] = jsonb_col()
 

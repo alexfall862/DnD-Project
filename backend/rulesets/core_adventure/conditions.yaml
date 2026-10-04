@@ -82,3 +82,20 @@ conditions:
     modifiers:
       - { target: stat.defense, op: subtract, value: 4 }
     removed_by: [medicine, healing]
+  - key: condition.surrendered
+    name: Surrendered
+    description: "has yielded; attacking a surrendered actor is a deliberate choice the narrator surfaces"
+    tags: [social, disabling]
+    modifiers:
+      - { target: stat.defense, op: subtract, value: 4 }
+  - key: condition.fleeing
+    name: Fleeing
+    tags: [movement]
+  - key: condition.in_cover
+    name: In cover
+    description: "intensity 1 = partial (+2 Defense vs ranged/non-engaged), 2 = strong (+4); total cover makes the actor untargetable"
+    stacking: intensity
+    max_intensity: 2
+    tags: [position]
+    modifiers:
+      - { target: stat.defense, op: add, value: "condition.in_cover * 2", condition: "not ctx.attacker_engaged", note: "cover vs attacks from outside engagement" }

@@ -30,9 +30,7 @@ class Event(Base):
     )
     sequence_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
-    payload_version: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("1")
-    )
+    payload_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     game_tick: Mapped[int] = mapped_column(BigInteger, nullable=False)
     scene_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scenes.id"))
     location_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("locations.id"))
@@ -133,6 +131,4 @@ class ScheduledEvent(Base):
     processed_event_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("events.id"))
     created_at: Mapped[datetime] = created_at_col()
 
-    __table_args__ = (
-        Index("ix_scheduled_events_due", "timeline_id", "status", "scheduled_tick"),
-    )
+    __table_args__ = (Index("ix_scheduled_events_due", "timeline_id", "status", "scheduled_tick"),)

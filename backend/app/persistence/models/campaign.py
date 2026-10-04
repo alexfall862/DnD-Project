@@ -35,9 +35,7 @@ class Campaign(Base):
     engine_version: Mapped[str] = mapped_column(Text, nullable=False)
     settings: Mapped[dict[str, Any]] = jsonb_col()
     generation_brief: Mapped[dict[str, Any]] = jsonb_col()
-    world_version: Mapped[int] = mapped_column(
-        BigInteger, nullable=False, server_default=text("0")
-    )
+    world_version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     created_at: Mapped[datetime] = created_at_col()
     updated_at: Mapped[datetime] = updated_at_col()
 

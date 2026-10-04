@@ -79,7 +79,7 @@ class RulesEngine:
         """Canonical hash of mechanical state (ignores instance/modifier ids and timestamps)."""
         payload = []
         for s in states:
-            p = s.to_profile()
+            p = s.to_profile(include_hidden=True)
             for c in p["conditions"]:
                 c.pop("instance_id", None)
             for m in p["temp_modifiers"]:

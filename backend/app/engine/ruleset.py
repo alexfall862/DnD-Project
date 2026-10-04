@@ -139,6 +139,83 @@ class DamageTypeDef(Definition):
     pass
 
 
+class TargetingDef(BaseModel):
+    """Declarative targeting (rules-engine §11)."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["none", "self", "actor", "zone", "item"] = "none"
+    bands: list[str] | None = None  # allowed range bands; None = any
+    hostile_only: bool = False
+    ally_only: bool = False
+    requires_los: bool = True
+    count: int = 1
+
+
+class ResolutionDef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal[
+        "attack",
+        "check",
+        "move",
+        "engage",
+        "disengage",
+        "take_cover",
+        "rest",
+        "effects",
+        "surrender",
+        "flee",
+        "pickup",
+        "drop",
+        "defend",
+        "protect",
+        "interrupt",
+        "wait",
+    ] = "effects"
+    check: str | None = None  # check.* key for attack/check kinds
+    attribute: str | None = None
+    skill: str | None = None
+    difficulty: int | str | None = None
+    weapon_slot: str | None = None  # equipment slot supplying damage for attacks
+    on_success: list[EffectStep] = Field(default_factory=list)
+    on_failure: list[EffectStep] = Field(default_factory=list)
+    effects: list[EffectStep] = Field(default_factory=list)  # unconditional
+    rest_kind: str | None = None
+    movement_steps: int = 1
+    cover_level: str | None = None
+
+
+class ActionDef(Definition):
+    category: str = "interaction"  # movement|attack|defense|interaction|social|exploration|...
+    cost: dict[str, int | bool] = Field(
+        default_factory=dict
+    )  # major/movement/reaction/free, stamina, resolve_points
+    time_cost_seconds: int = 6
+    targeting: TargetingDef = Field(default_factory=TargetingDef)
+    requirements: list[Formula] = Field(
+        default_factory=list
+    )  # all must hold; refs ctx.*/attr.* ...
+    resolution: ResolutionDef = Field(default_factory=ResolutionDef)
+    reaction_trigger: str | None = None  # attacked | ally_attacked | enemy_disengages | ...
+    unsafe_movement: bool = False  # provokes opportunity attacks when leaving engagement
+
+
+class EquipmentDef(Definition):
+    """Equipment templates (rules-engine §21). Instances carry public/hidden properties."""
+
+    slot: Literal["weapon", "armor", "shield", "gear"] = "gear"
+    melee: bool = True
+    damage: str | None = None  # dice expression
+    damage_type: str = "damage.physical"
+    attack_check: str | None = None  # check.melee_attack / check.ranged_attack
+    attribute_bonus: Formula = 0  # added to damage (tunable, core-adventure §10)
+    range_bands: dict[str, int | None] = Field(
+        default_factory=dict
+    )  # band -> attack modifier, None = cannot
+    modifiers: list[ModifierDef] = Field(default_factory=list)  # armour: stat.defense etc.
+    capabilities: list[str] = Field(default_factory=list)
+    two_handed: bool = False
+
+
 class RulesetManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     key: str
@@ -174,6 +251,8 @@ DEF_TYPES: dict[str, type[Definition]] = {
     "checks": CheckDef,
     "conditions": ConditionDef,
     "damage_types": DamageTypeDef,
+    "actions": ActionDef,
+    "equipment": EquipmentDef,
 }
 PREFIX: dict[str, str] = {
     "attributes": "attr.",
@@ -184,6 +263,8 @@ PREFIX: dict[str, str] = {
     "checks": "check.",
     "conditions": "condition.",
     "damage_types": "damage.",
+    "actions": "action.",
+    "equipment": "item.",
 }
 
 
@@ -255,6 +336,14 @@ class Ruleset:
     def derived_stats(self) -> dict[str, DerivedStatDef]:
         return self.defs["derived_stats"]  # type: ignore[return-value]
 
+    @property
+    def actions(self) -> dict[str, ActionDef]:
+        return self.defs["actions"]  # type: ignore[return-value]
+
+    @property
+    def equipment(self) -> dict[str, EquipmentDef]:
+        return self.defs["equipment"]  # type: ignore[return-value]
+
     def degree_for_margin(self, margin: int) -> MarginBand:
         for band in self.manifest.margins:
             lo = band.min if band.min is not None else -(10**9)
@@ -296,6 +385,52 @@ class Ruleset:
                 if isinstance(d, ConditionDef):
                     problems += self._check_steps(d.key, d.on_apply, effect_types)
                     problems += self._check_steps(d.key, d.on_remove, effect_types)
+        for d in self.actions.values():
+            for f in d.requirements:
+                problems += self._check_formula(d.key, "requirement", f)
+            r = d.resolution
+            if r.check and not self.has(r.check):
+                problems.append(f"{d.key}: resolution.check {r.check!r} unknown")
+            if r.attribute and not self.has(r.attribute):
+                problems.append(f"{d.key}: resolution.attribute {r.attribute!r} unknown")
+            if r.skill and not self.has(r.skill):
+                problems.append(f"{d.key}: resolution.skill {r.skill!r} unknown")
+            if isinstance(r.difficulty, str) and r.difficulty not in self.manifest.difficulty_scale:
+                problems.append(f"{d.key}: unknown difficulty {r.difficulty!r}")
+            if d.targeting.bands:
+                known = set(self.manifest.settings.get("range_bands", []))
+                bad = [b for b in d.targeting.bands if known and b not in known]
+                problems += [f"{d.key}: unknown range band {b!r}" for b in bad]
+            for steps in (r.on_success, r.on_failure, r.effects):
+                problems += self._check_steps(d.key, steps, effect_types)
+            for ck in ("major", "movement", "reaction", "free"):
+                v = d.cost.get(ck)
+                if v is not None and not isinstance(v, bool):
+                    problems.append(f"{d.key}: cost.{ck} must be boolean")
+            for rk in d.cost:
+                if rk.startswith("resource.") and not self.has(rk):
+                    problems.append(f"{d.key}: cost resource {rk!r} unknown")
+        for d in self.equipment.values():
+            if d.damage:
+                try:
+                    from app.engine.dice import parse_dice
+
+                    parse_dice(d.damage)
+                except Exception as exc:  # noqa: BLE001
+                    problems.append(f"{d.key}: damage {d.damage!r}: {exc}")
+            if not self.has(d.damage_type):
+                problems.append(f"{d.key}: damage_type {d.damage_type!r} unknown")
+            if d.attack_check and not self.has(d.attack_check):
+                problems.append(f"{d.key}: attack_check {d.attack_check!r} unknown")
+            problems += self._check_formula(d.key, "attribute_bonus", d.attribute_bonus)
+            for m in d.modifiers:
+                problems += self._check_modifier(d.key, m)
+            known = set(self.manifest.settings.get("range_bands", []))
+            problems += [
+                f"{d.key}: unknown range band {b!r}"
+                for b in d.range_bands
+                if known and b not in known
+            ]
         if not self.manifest.margins:
             problems.append("manifest: margins table is required")
         problems += self._check_trigger_cycles()

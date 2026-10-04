@@ -19,7 +19,7 @@ from typing import Any
 from app.engine.dice import DICE_RE, DiceService, RollRecord
 from app.engine.expressions import ExpressionError, compile_expr, evaluate_int
 from app.engine.ruleset import EffectStep, Ruleset
-from app.engine.stats import ActorState, ConditionInstance, Modifier, StatCalculator
+from app.engine.stats import ActorState, ConditionInstance, ItemState, Modifier, StatCalculator
 
 MAX_TRIGGER_DEPTH = 4
 MAX_EFFECTS_PER_CHAIN = 32
@@ -237,6 +237,7 @@ def _temp_modifier(
         priority=int(p.get("priority", 0)),
         note=p.get("note", ""),
         expires_tick=(ctx.tick + int(duration)) if duration is not None else None,
+        value_src=value,
     )
     state.temp_modifiers.append(mod)
     return [
@@ -470,3 +471,195 @@ def expire(state: ActorState, tick: int, ctx: EffectContext) -> list[Mutation]:
             )
         )
     return out
+
+
+# ---------------------------------------------------------------------------------------------
+# Milestone 02b primitives. Those that touch the world beyond one actor's state return
+# request-style mutations the owning service turns into events/projections.
+# ---------------------------------------------------------------------------------------------
+
+
+@primitive("grant_capability")
+def grant_capability(state: ActorState, p: dict[str, Any], ctx: EffectContext) -> list[Mutation]:
+    cap = p["capability"]
+    before = cap in state.capabilities
+    state.capabilities.add(cap)
+    return [Mutation("capability", state.actor_key, cap, before, True, ctx.source)]
+
+
+@primitive("remove_capability")
+def remove_capability(state: ActorState, p: dict[str, Any], ctx: EffectContext) -> list[Mutation]:
+    cap = p["capability"]
+    before = cap in state.capabilities
+    state.capabilities.discard(cap)
+    return [Mutation("capability", state.actor_key, cap, before, False, ctx.source)]
+
+
+@primitive("transfer_item")
+def transfer_item(state: ActorState, p: dict[str, Any], ctx: EffectContext) -> list[Mutation]:
+    """Move an item instance from this actor to another actor state in `ctx.values['states']`
+    (or to the ground: `to=None` with a `zone`)."""
+    key = p["item"]
+    item = state.item(key)
+    if item is None:
+        raise EffectError(f"{state.actor_key} does not hold {key!r}")
+    to_key = p.get("to")
+    state.equipment = [i for i in state.equipment if i.instance_key != key]
+    item.equipped = False
+    if to_key:
+        states: dict[str, ActorState] = ctx.values.get("states", {})
+        if to_key not in states:
+            raise EffectError(f"unknown recipient {to_key!r}")
+        states[to_key].equipment.append(item)
+    else:
+        ground: dict[str, list[ItemState]] = ctx.values.setdefault("ground", {})
+        ground.setdefault(p.get("zone", "here"), []).append(item)
+    item.history.append(f"transfer:{state.actor_key}->{to_key or 'ground'}")
+    return [
+        Mutation(
+            "item_transfer",
+            state.actor_key,
+            key,
+            state.actor_key,
+            to_key,
+            ctx.source,
+            {"zone": p.get("zone")},
+        )
+    ]
+
+
+@primitive("move_entity")
+def move_entity(state: ActorState, p: dict[str, Any], ctx: EffectContext) -> list[Mutation]:
+    """Forced movement within the scene space (`ctx.values['space']`), e.g. a shove."""
+    space = ctx.values.get("space")
+    if space is None:
+        return [
+            Mutation(
+                "move_request", state.actor_key, "zone", None, p.get("zone"), ctx.source, dict(p)
+            )
+        ]
+    before = space.position(state.actor_key).zone
+    if p.get("disengage"):
+        space.disengage(state.actor_key)
+    if p.get("zone"):
+        space.move_to(state.actor_key, p["zone"])
+    return [
+        Mutation(
+            "position",
+            state.actor_key,
+            "zone",
+            before,
+            space.position(state.actor_key).zone,
+            ctx.source,
+        )
+    ]
+
+
+@primitive("create_entity")
+def create_entity(state: ActorState, p: dict[str, Any], ctx: EffectContext) -> list[Mutation]:
+    return [
+        Mutation(
+            "entity_create",
+            state.actor_key,
+            p.get("entity_type", "item"),
+            None,
+            p.get("name"),
+            ctx.source,
+            dict(p),
+        )
+    ]
+
+
+@primitive("destroy_entity")
+def destroy_entity(state: ActorState, p: dict[str, Any], ctx: EffectContext) -> list[Mutation]:
+    key = p.get("item")
+    if key and state.item(key):
+        state.equipment = [i for i in state.equipment if i.instance_key != key]
+    return [
+        Mutation(
+            "entity_destroy",
+            state.actor_key,
+            key or p.get("entity", ""),
+            True,
+            False,
+            ctx.source,
+            dict(p),
+        )
+    ]
+
+
+@primitive("trigger_event")
+def trigger_event(state: ActorState, p: dict[str, Any], ctx: EffectContext) -> list[Mutation]:
+    return [
+        Mutation(
+            "event_request",
+            state.actor_key,
+            p.get("event_type", "custom"),
+            None,
+            None,
+            ctx.source,
+            dict(p),
+        )
+    ]
+
+
+@primitive("schedule_event")
+def schedule_event(state: ActorState, p: dict[str, Any], ctx: EffectContext) -> list[Mutation]:
+    return [
+        Mutation(
+            "schedule_request",
+            state.actor_key,
+            p.get("event_type", "custom"),
+            None,
+            ctx.tick + int(p.get("delay_seconds", 0)),
+            ctx.source,
+            dict(p),
+        )
+    ]
+
+
+@primitive("reveal_information")
+def reveal_information(state: ActorState, p: dict[str, Any], ctx: EffectContext) -> list[Mutation]:
+    """A structured 'tell' or discovery for the perspective layer (Milestone 03) to record."""
+    if p.get("item_property") and p.get("item"):
+        item = state.item(p["item"])
+        if item and p["item_property"] in item.hidden:
+            item.public[p["item_property"]] = item.hidden[p["item_property"]]
+            return [
+                Mutation(
+                    "item_property_revealed",
+                    state.actor_key,
+                    p["item"],
+                    None,
+                    p["item_property"],
+                    ctx.source,
+                )
+            ]
+    return [
+        Mutation(
+            "reveal",
+            state.actor_key,
+            p.get("kind", "tell"),
+            None,
+            p.get("text") or p.get("fact"),
+            ctx.source,
+            dict(p),
+        )
+    ]
+
+
+@primitive("change_relationship")
+def change_relationship(state: ActorState, p: dict[str, Any], ctx: EffectContext) -> list[Mutation]:
+    """Stub: records a relationship delta request; the relationships service (Milestone 06b)
+    applies it with event provenance."""
+    return [
+        Mutation(
+            "relationship_delta",
+            state.actor_key,
+            p.get("target", ""),
+            None,
+            {p.get("dimension", "trust"): p.get("delta", 0)},
+            ctx.source,
+            dict(p),
+        )
+    ]

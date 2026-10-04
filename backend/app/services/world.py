@@ -23,6 +23,7 @@ from app.persistence.models import (
     Campaign,
     Entity,
     Event,
+    Item,
     Location,
     LocationEdge,
     Scene,
@@ -390,6 +391,74 @@ class WorldService:
                 await self._advance_clock(tx, travel_seconds, reason="travel", cause=move)
         return move
 
+    # -- items ---------------------------------------------------------------------------------
+
+    async def create_item(
+        self,
+        h: CampaignHandle,
+        name: str,
+        *,
+        template_key: str | None,
+        possessor_actor_id: uuid.UUID | None = None,
+        location_id: uuid.UUID | None = None,
+        zone_key: str | None = None,
+        owner_actor_id: uuid.UUID | None = None,
+        equipped: bool = True,
+        public_properties: dict[str, Any] | None = None,
+        hidden_properties: dict[str, Any] | None = None,
+        importance_tier: str = "standard",
+        item_type: str = "gear",
+        provenance: dict[str, Any] | None = None,
+    ) -> Item:
+        """A unique persistent item (world-memory §15). Ownership and possession are distinct;
+        hidden properties exist objectively from creation (rules-engine §22)."""
+        async with self._tx(h) as tx:
+            possessor_entity = owner_entity = None
+            if possessor_actor_id is not None:
+                possessor_entity = (
+                    await self._get(Actor, possessor_actor_id, what="actor")
+                ).entity_id
+            if owner_actor_id is not None:
+                owner_entity = (await self._get(Actor, owner_actor_id, what="actor")).entity_id
+            entity = Entity(
+                campaign_id=h.campaign_id,
+                entity_type="item",
+                canonical_name=name,
+                importance_tier=importance_tier,
+            )
+            self.session.add(entity)
+            await self.session.flush()
+            item = Item(
+                entity_id=entity.id,
+                template_key=template_key,
+                item_type=item_type,
+                mechanical_snapshot={"equipped": equipped and possessor_entity is not None},
+                owner_entity_id=owner_entity or possessor_entity,
+                possessor_entity_id=possessor_entity,
+                location_id=location_id if possessor_entity is None else None,
+                zone_key=zone_key if possessor_entity is None else None,
+                public_properties=public_properties or {},
+                hidden_properties=hidden_properties or {},
+                provenance=provenance or {},
+            )
+            self.session.add(item)
+            await self.session.flush()
+            event = await tx.emit(
+                ev.ItemCreated(
+                    item_id=item.id,
+                    entity_id=entity.id,
+                    name=name,
+                    template_key=template_key,
+                    possessor_actor_id=possessor_actor_id,
+                    location_id=location_id,
+                ),
+                location_id=location_id,
+                entities=[(entity.id, "subject")],
+            )
+            entity.created_event_id = event.id
+            item.created_event_id = event.id
+        return item
+
     # -- scenes --------------------------------------------------------------------------------
 
     async def start_scene(
@@ -400,8 +469,23 @@ class WorldService:
         scene_type: str = "social",
         participant_actor_ids: list[uuid.UUID] | None = None,
         state: dict[str, Any] | None = None,
+        space: dict[str, Any] | None = None,
     ) -> Scene:
+        """`space` is a serialised `SceneSpace` (zones/adjacency/positions); participants not
+        placed in it are put in its first zone."""
         participant_actor_ids = participant_actor_ids or []
+        scene_state = dict(state or {})
+        if space is not None:
+            space = dict(space)
+            positions = dict(space.get("positions", {}))
+            first_zone = space["zones"][0]["key"]
+            for actor_id in participant_actor_ids:
+                positions.setdefault(
+                    str(actor_id),
+                    {"zone": first_zone, "engaged_with": [], "cover": "none", "elevated": False},
+                )
+            space["positions"] = positions
+            scene_state["space"] = space
         async with self._tx(h) as tx:
             scene = Scene(
                 campaign_id=h.campaign_id,
@@ -410,7 +494,7 @@ class WorldService:
                 scene_type=scene_type,
                 start_tick=tx.clock.current_tick,
                 local_tick=tx.clock.current_tick,
-                state=state or {},
+                state=scene_state,
             )
             self.session.add(scene)
             await self.session.flush()
