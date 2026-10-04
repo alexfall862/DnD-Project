@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +32,7 @@ from app.engine.actions import (
     end_round,
 )
 from app.engine.core import RulesEngine
+from app.engine.effects import apply_steps
 from app.engine.encounter import Encounter
 from app.engine.positioning import SceneSpace, Zone
 from app.engine.stats import ActorState, ItemState
@@ -51,7 +53,9 @@ from app.persistence.models import (
     SceneParticipant,
     WorldClock,
 )
+from app.persistence.repositories.perspective import PerspectiveRepository
 from app.services.events import EventTransaction
+from app.services.observations import ObservationInputs, ObservationService, Observer
 from app.services.world import CampaignHandle, WorldError, WorldService
 
 
@@ -263,6 +267,114 @@ class ActionService:
         await self._commit(h, loaded, outcome, request, turn_id)
         return outcome
 
+    async def perform_improvised(
+        self,
+        h: CampaignHandle,
+        scene_id: uuid.UUID,
+        actor_key: str,
+        ruling: dict[str, Any],
+        *,
+        description: str,
+        chooser: ReactionChooser | None = None,
+        turn_id: uuid.UUID | None = None,
+    ) -> ActionOutcome:
+        """Execute a Rules Adjudicator ruling (rules-engine §31): an optional check, then the
+        on_success / on_failure effect compositions, all through registered primitives. The
+        ruling must already be validated (`validate_ruling`). Committed like any action."""
+        loaded = await self.load_scene(h, scene_id, chooser=chooser)
+        ctx = loaded.ctx
+        state = ctx.states[actor_key]
+        from app.engine.actions import ActionRequest as _AR
+        from app.engine.actions import ResolutionTrace, StepRecord
+
+        req = _AR(
+            actor_key,
+            "action.improvised",
+            None,
+            params={"description": description, "ruling": ruling},
+            source="human",
+        )
+        trace = ResolutionTrace(
+            "action.improvised",
+            actor_key,
+            None,
+            rules_consulted=["rules_adjudicator"],
+            summary=f"{actor_key} improvises: {description}",
+        )
+        out = ActionOutcome(req, "resolving", trace=trace)
+        if state.has_condition("condition.incapacitated"):
+            out.status, out.reason = "invalid", "actor is incapacitated"
+            return out
+        if ctx.in_combat and ctx.encounter is not None:
+            budget = ctx.encounter.budget(actor_key)
+            if not budget.can_pay({"major": True}):
+                out.status, out.reason = "invalid", "no major action left this turn"
+                return out
+            budget.pay({"major": True})
+            trace.costs_paid = {"major": True}
+        success = True
+        check = ruling.get("check") if ruling.get("requires_check") else None
+        if check:
+            r = self.engine.check(
+                state,
+                check.get("check", "check.core"),
+                attribute=check.get("attribute"),
+                skill=check.get("skill"),
+                difficulty=check.get("difficulty", "moderate"),
+                purpose="improvised",
+            )
+            step = StepRecord(
+                "check",
+                "ok",
+                {"total": r.total, "target": r.target, "degree": r.degree, "success": r.success},
+            )
+            step.rolls.append(r.roll)
+            out.steps.append(step)
+            out.check = r
+            trace.rules_consulted += list(r.rules_consulted)
+            out.events.append(
+                {
+                    "type": "check.rolled",
+                    "actor": actor_key,
+                    "action": "action.improvised",
+                    "check": r.check_key,
+                    "total": r.total,
+                    "versus": r.target,
+                    "success": r.success,
+                    "degree": r.degree,
+                }
+            )
+            success = bool(r.success)
+        steps = ruling.get("on_success" if success else "on_failure") or []
+        if steps:
+            step = StepRecord(
+                "effects", "ok", {"branch": "on_success" if success else "on_failure"}
+            )
+            ectx = ctx.effect_ctx(actor_key)
+            step.mutations += apply_steps(steps, state, ectx)
+            step.rolls += ectx.rolls
+            out.steps.append(step)
+        out.status = "succeeded" if success else "failed"
+        out.time_cost_seconds = 0 if ctx.in_combat else int(ruling.get("time_cost_seconds", 6))
+        trace.rolls = [r for s_ in out.steps for r in s_.rolls]
+        trace.mutations = out.mutations
+        trace.effects_applied = [
+            {"kind": m.kind, "field": m.field, "before": m.before, "after": m.after}
+            for m in out.mutations
+        ]
+        out.events.append(
+            {
+                "type": "action.resolved",
+                "actor": actor_key,
+                "action": "action.improvised",
+                "target": None,
+                "status": out.status,
+                "time_cost_seconds": out.time_cost_seconds,
+            }
+        )
+        await self._commit(h, loaded, out, req, turn_id)
+        return out
+
     async def start_encounter(
         self, h: CampaignHandle, scene_id: uuid.UUID, sides: dict[uuid.UUID, str]
     ) -> Encounter:
@@ -361,6 +473,7 @@ class ActionService:
             self.session.add(action)
             await self.session.flush()
             resolved: Event | None = None
+            emitted: list[tuple[Event, dict[str, Any]]] = []
             for e in outcome.events:
                 payload = dict(e)
                 etype = payload.pop("type")
@@ -376,10 +489,12 @@ class ActionService:
                     location_id=loaded.scene.location_id,
                     entities=[(subject.entity_id, "actor")] if subject else [],
                 )
+                emitted.append((event, payload))
                 if etype == "action.resolved":
                     resolved = event
             assert resolved is not None
             action.resolution_event_id = resolved.id
+            await self._observe(h, loaded, tx, emitted)
             for idx, step in enumerate(outcome.steps):
                 self.session.add(
                     ActionStep(
@@ -434,6 +549,43 @@ class ActionService:
                     reason=f"action:{request.action_key}",
                     cause=resolved,
                 )
+
+    async def _observe(
+        self,
+        h: CampaignHandle,
+        loaded: LoadedScene,
+        tx: EventTransaction,
+        emitted: list[tuple[Event, dict[str, Any]]],
+    ) -> None:
+        """Every mechanic event becomes per-observer Observations (observation-authoring §2)."""
+        repo = PerspectiveRepository(self.session)
+        observers: dict[str, Observer] = {}
+        identity: dict[uuid.UUID, dict[uuid.UUID, str]] = {}
+        hidden: set[str] = set()
+        for key, st in loaded.ctx.states.items():
+            a = loaded.actors[key]
+            observers[key] = Observer(
+                actor_id=a.id,
+                entity_id=a.entity_id,
+                senses={c for c in st.capabilities if c.startswith("sense:")}
+                or {"sense:vision", "sense:hearing"},
+                incapacitated=st.has_condition("condition.incapacitated"),
+                detected=set(loaded.ctx.detected.get(key, set())),
+            )
+            identity[a.id] = {
+                eid: row.known_name for eid, row in (await repo.identity_knowledge(a.id)).items()
+            }
+            if st.has_condition("condition.hidden"):
+                hidden.add(key)
+        actor_entity = {key: loaded.actors[key].entity_id for key in loaded.ctx.states}
+        descriptors = {
+            e.id: (e.metadata_ or {}).get("descriptor") or "a stranger"
+            for e in loaded.entities.values()
+        }
+        inputs = ObservationInputs(observers, hidden, identity, actor_entity, descriptors)
+        svc = ObservationService(self.session)
+        for event, payload in emitted:
+            await svc.observe(tx, event, payload, loaded.scene, inputs)
 
     async def _persist_rolls(
         self, h: CampaignHandle, loaded: LoadedScene, event: Event, records

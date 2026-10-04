@@ -22,7 +22,9 @@ def make_engine(url: str, *, connect_timeout_s: float = 5.0, echo: bool = False)
         url,
         echo=echo,
         pool_pre_ping=True,
-        connect_args={"timeout": connect_timeout_s},
+        # No prepared-statement cache: tables are dropped/recreated at runtime (migration smoke
+        # test, `make reset-db`), which otherwise leaves asyncpg with stale cached plans.
+        connect_args={"timeout": connect_timeout_s, "prepared_statement_cache_size": 0},
     )
 
 

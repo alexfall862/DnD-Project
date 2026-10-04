@@ -44,7 +44,9 @@ class Settings(BaseSettings):
     model_profile_balanced_reasoning: str = "ttrpg/local-general"
     model_profile_creative_narrative: str = "ttrpg/local-general"
     model_profile_deep_world_author: str = "ttrpg/local-general"
-    model_profile_embedding: str = "ttrpg/local-general"
+    model_profile_embedding: str = "ttrpg/local-embed"
+    model_profile_rerank: str = "ttrpg/local-rerank"
+    embedding_dimensions: int = 1024
     provider_mode: Literal["local_only", "local_preferred", "best_available", "cloud_only"] = (
         "local_only"
     )
@@ -53,6 +55,8 @@ class Settings(BaseSettings):
     # budgets / concurrency
     max_sync_model_calls_per_turn: int = Field(default=4, ge=0)
     hard_cap_sync_model_calls_per_turn: int = Field(default=6, ge=0)
+    spotlight_visible_reactions: int = Field(default=2, ge=0)  # AI reactions with a call per turn
+    narrator_enabled: bool = True  # stream the Narrator after mechanics (06c)
     max_concurrent_inference: int = Field(default=2, ge=1)
 
     @property

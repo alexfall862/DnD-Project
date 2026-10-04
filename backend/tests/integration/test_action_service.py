@@ -295,6 +295,45 @@ async def test_combat_turn_persists_rolls_traces_state_and_time(
         )
     ).scalar_one()
     assert hp.current < 18 and hp.last_changed_event_id == act.resolution_event_id
+    # observations: every participant saw the attack the way *they* know the actors
+    from app.persistence.models import Observation
+    from app.services.observations import ObservationService
+
+    obs = (
+        (
+            await session.execute(
+                select(Observation).where(Observation.source_event_id == act.resolution_event_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    hits = (
+        (
+            await session.execute(
+                select(Observation)
+                .where(
+                    Observation.observation_type == "event",
+                    Observation.campaign_id == h.campaign_id,
+                )
+                .order_by(Observation.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    by_actor = {}
+    for o in hits:
+        if o.raw.get("event_type") == "damage.dealt":
+            by_actor[o.actor_id] = o
+    assert set(by_actor) == {actors["elara"].id, actors["tomas"].id, actors["thief"].id}
+    thief_view, elara_view = by_actor[actors["thief"].id], by_actor[actors["elara"].id]
+    assert "amount" in thief_view.raw["participant_only"]  # the one struck knows how hard
+    assert "participant_only" not in elara_view.raw  # a bystander sees a strike, not a number
+    assert thief_view.raw["participants"][1]["known_as"] == "you"
+    assert elara_view.raw["participants"][0]["known_as"] == "a stranger"  # no identity seeded
+    assert ObservationService.render(elara_view.raw).startswith("A stranger strikes a stranger")
+    assert not obs or all(o.actor_id in {actors[k].id for k in actors} for o in obs)
     # reload in a fresh session: state round-trips through the DB
     async with session_factory() as s2:
         loaded = await ActionService(s2, RulesEngine(rules.ruleset)).load_scene(h, scene.id)

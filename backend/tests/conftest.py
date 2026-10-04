@@ -26,6 +26,8 @@ from app.persistence.db import make_engine
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 
+pytest_plugins = ["tests.fixtures.frostbridge"]
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption("--eval", action="store_true", default=False, help="run real-model evals")
@@ -56,7 +58,12 @@ def base_settings() -> Settings:
 def test_settings(base_settings: Settings) -> Settings:
     """Settings pointed at the test database."""
     return base_settings.model_copy(
-        update={"app_env": "test", "database_url": base_settings.test_database_url}
+        update={
+            "app_env": "test",
+            "database_url": base_settings.test_database_url,
+            "a9_token": "",
+            "narrator_enabled": False,  # 06c tests switch it on explicitly
+        }
     )
 
 
@@ -109,9 +116,15 @@ def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
 
 
 @pytest_asyncio.fixture
-async def client(test_settings: Settings, migrated_db: str) -> AsyncIterator[AsyncClient]:
-    """HTTP client against an app wired to the (migrated) test database, with lifespan run."""
-    app = create_app(test_settings)
-    async with LifespanManager(app):
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            yield c
+async def app(test_settings: Settings, migrated_db: str):
+    """The ASGI app with lifespan run; `app.state.provider` is a FakeModelProvider in tests."""
+    application = create_app(test_settings)
+    async with LifespanManager(application):
+        yield application
+
+
+@pytest_asyncio.fixture
+async def client(app) -> AsyncIterator[AsyncClient]:
+    """HTTP client against an app wired to the (migrated) test database."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        yield c

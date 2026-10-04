@@ -23,7 +23,8 @@ profiles:                      # `model` = A9 project; A9 currently routes all o
   balanced_reasoning: { model: ttrpg/local-general, quant: "?", ctx_window: 32768, measured_tps: 22.5, schema_valid_rate: 0.80 }   # AI Player / NPC Actor n=90 raw; 0.94 after one repair
   creative_narrative: { model: ttrpg/local-general, quant: "?", ctx_window: 32768, measured_tps: 22.5, schema_valid_rate: 1.00 }   # narrator p50 13.6 s total
   deep_world_author:  { model: ttrpg, quant: "?", ctx_window: "?", measured_tps: 43, schema_valid_rate: "not measured" }
-  embedding:          { model: ___, dims: ___, measured_embeds_per_s: ___ }   # A9 exposes no embedding endpoint yet — see DECISIONS.md
+  embedding:          { model: ttrpg/local-embed, dims: 1024, max_input_tokens: 2048, measured_embeds_per_s: 20 }  # Qwen3-Embedding-0.6B, CPU; input_type query|document
+  rerank:             { model: ttrpg/local-rerank, max_input_tokens: 4096 }   # bge-reranker-v2-m3, CPU; scores are raw logits
 cloud_fallback:
   enabled: false
   profiles_allowed: []         # e.g. [deep_world_author]
@@ -98,3 +99,22 @@ Same model (`ttrpg/local-general`, GLM-4.5-Air), 200-token completions, distinct
   tokens; the fourth, arriving first and cold, did not).
 - Planning rule: **two independent calls cost ≈ 1.5x one call, not 2x.** Batch independent AI
   reactions in pairs; do not expect more than that.
+
+## Embeddings and rerank (added to A9 2026-10-03)
+
+`GET /v1/models?all=true` lists them; plain `/v1/models` stays chat-only. Both run on CPU and do
+not compete with GLM. Measured from the dev box:
+
+| Call | Result |
+|---|---|
+| `POST /v1/embeddings`, 64 documents | 3.3 s cold (A9 reports ~1 s warm), 1024 floats each, input order kept |
+| one query, `input_type: query` | 0.11 s; cosine margin over the runner-up 0.43 vs 0.38 as `document` |
+| `POST /v1/rerank`, 6 documents | 0.37 s, correct document first; scores are raw logits (top was -1.5, irrelevant -11) |
+| errors | 400 empty / >256 items or wrong model kind, 404 unknown model, 503 busy |
+
+## Live turn measurements (2026-10-03, `make play`, GLM-4.5-Air via A9)
+
+Social turn = Intent Interpreter + one actor reaction + Narrator: 36–38 s wall, first output
+11–13 s (the interpreter), first narration token 33–34 s. Per call: interpreter ≈ 10 s
+(1.2k prompt / 150 output tokens), actor 13–21 s (200–380 output tokens), narrator ≈ 4 s to
+first token. Details and the fixes they triggered: `tasks/milestone-06d-cli-play-harness.md`.

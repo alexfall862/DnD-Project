@@ -315,6 +315,83 @@ plateau from 2 callers upward). Two concurrent calls ≈ 1.5x one call. Conseque
 - Worth asking Alex: whether the server runs `--parallel 4` with experts offloaded to CPU; if
   decode is bandwidth/compute-bound by offload, more slots will not help.
 
+### Embeddings and rerank via A9 (2026-10-03)
+A9 now serves `ttrpg/local-embed` (Qwen3-Embedding-0.6B, 1024 dims) and `ttrpg/local-rerank`
+(bge-reranker-v2-m3) to the `ai-ttrpg` token. Memory retrieval uses them in the order
+authorize → structured candidates → query embedding (`input_type: query`) → vector shortlist →
+rerank → score. Memories are embedded as `document`. Vector column is `vector(1024)`.
+Rerank scores are logits and are only compared within one call (or squashed by a sigmoid).
+
+**No ANN index in v0.1.** pgvector's HNSW/IVFFlat indexes apply `WHERE` filters after the
+approximate search, which can under-fill results and inverts the "authorization before
+semantic ranking" rule. Retrieval therefore does an exact cosine scan restricted to one actor's
+memories (B-tree on `actor_id`); at ~1k memories per actor that is milliseconds. Revisit at
+Milestone 11 (stress) with per-actor partitioning or iterative index scans if needed.
+
+### AI actors (06b) — implementation decisions (2026-10-03)
+
+- **Reaction significance is engine-side and cheap.** Signals are engine facts (addressed,
+  asked, attacked, received a Claim, Claim touches a goal target, relationship row exists,
+  novelty in this scene, strongest emotion, importance tier). Weights live in
+  `app/engine/reactions.py`; `high ≥ 0.55` gets a model call (bounded by
+  `SPOTLIGHT_VISIBLE_REACTIONS`), `medium ≥ 0.3` is noted silently, `low` is ignored. A
+  question addressed to one actor does not make everyone who overheard it "asked".
+- **In combat, initiative turns are the reactions.** No reaction calls are made during an
+  encounter; AI combatants act on their turn, and the human's turn ends when their major
+  action is spent (or they wait/flee/surrender).
+- **Fallback policies are the default, not a degradation.** A stored policy is reused whenever
+  `situation_unchanged` holds (same target standing and hostile, health above the flee
+  threshold, no heavy damage since); the ladder step forces reuse even when it changed. This
+  is what keeps a 5-combatant round near one or two calls after round 1.
+- **Corroboration includes the question being answered.** "Weeks ago." carries no key term
+  of the fact it lies about; the question it answers ("when did you last speak to Oric?")
+  does. `communication-and-knowledge.md` §2 corroboration is therefore checked against the
+  spoken text ∪ the terms of the last question-stance Claims the speaker heard.
+- **Any ref the engine cannot map is leakage.** A short ref not in the supplied context, or
+  a raw id outside the speaker's perspective, rejects the whole proposal and records
+  `proposal.rejected_leakage`; dropping the item silently would let the rest of the speech
+  through while hiding the incident.
+- **Concurrent decisions, sequential writes.** `ModelRunner.run_many` creates all ModelRun
+  rows, gathers provider calls concurrently, then validates/persists in order on the single
+  session. Applying is sequential by significance with revalidation against the current
+  scene.
+- **Failed actions get a ledger event.** `action.resolved(status=failed)` is emitted after a
+  dispatch error (costs were paid, partial mutations may stand). Previously such outcomes had
+  no event, which broke the commit path once AI combatants started failing moves.
+- **Contract additions:** `relationship_proposals` (±10 per dimension, event-linked),
+  typed `goal_updates`, `fallback_policy`, `speech_act.knowingly_false`. `npc_tactical`
+  is registered but unused.
+
+### Narration, governor, memory (06c) — implementation decisions (2026-10-03)
+
+- **The narrator is a prose role.** Streaming JSON would put `{"narration": "` in front of
+  the first token; the client wants prose deltas. Decoration extraction is the separate,
+  cheap Canon Extractor pass on the finished prose (allowlist-validated), so nothing is lost.
+- **Compression means a count, not a summary.** When the spotlight budget is exceeded the
+  narrator is told "N other(s) present react quietly"; it is never given invented content to
+  summarise, and no Claims or Observations are produced for compressed actors.
+- **Checkpoint windows are per actor per scene.** `scene.state.memory_checkpoints[actor]`
+  holds the timestamp of the last processed observation, so a deferred checkpoint picks up
+  exactly where it stopped; the window itself is the memory's lineage when the model cites
+  nothing usable.
+- **Model clarification requests are advisory.** Engine-side candidate resolution decides
+  (04b, orchestration §10); GLM asked "which actor?" for `I ask Mira quietly …`. Loose target
+  spellings from the model are matched to candidate refs by name tokens.
+- **Encyclopedia is rebuilt on read.** It is a projection of identity knowledge + beliefs; no
+  model, no event, cheap enough to rebuild per request until it is not.
+
+### Terminal harness (06d) — implementation decisions (2026-10-03)
+
+- **The seed lives in the app, not in tests.** `app/seeds/frostbridge_tavern.py` is the one
+  Red Lantern; the pytest fixture, the debug `seed-demo` endpoint and the harness share it,
+  so what the tests prove is what the terminal plays.
+- **Debug endpoints are the harness's only privileged path.** Seeding, actor listing, scene
+  end, metrics and model-run contexts are `/debug/*` (DEBUG_MODE). Everything the player sees
+  comes from the normal perspective endpoints and `/play`.
+- **Narration is streamed on a terminal and buffered elsewhere.** The harness writes
+  `narration_delta` tokens straight to stdout when its sink is `print`; any other sink (tests,
+  logs) receives the joined narration once, so output lines stay meaningful.
+
 ### Pending
 - **2026-10-03, later:** A9 was updated after the spike. The project now serves **GLM-4.5-Air**
   as `ttrpg/local-general` (explicit model name; A9 never substitutes; 409 = not loaded, wait
@@ -353,8 +430,7 @@ plateau from 2 callers upward). Two concurrent calls ≈ 1.5x one call. Conseque
      cap and at the complex-turn target with one reaction dropped by the ladder.
   7. **One A9 project for all profiles for now.** `local-general` was swapped out throughout.
      Routing stays logical; revisit when a second resident model exists.
-  8. **No embedding endpoint on A9.** Milestone 04 needs one: either A9 exposes
-     `/v1/embeddings` or the backend runs a small local embedding model (CPU is fine for
-     v0.1 volumes). **Decide before Milestone 04 starts.**
+  8. **No embedding endpoint on A9.** ~~Decide before Milestone 04.~~ Resolved: A9 added
+     embeddings and rerank (see "Embeddings and rerank via A9").
 - Models behind A9's two slots and Deep mode: **still unknown** (`local-coder` is what was
   measured; name/size/quant/ctx to be recorded in `HARDWARE-TARGET.md`).

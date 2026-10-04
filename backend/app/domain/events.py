@@ -234,6 +234,209 @@ class ItemCreated(EventPayload):
     location_id: uuid.UUID | None = None
 
 
+class SpeechUttered(EventPayload):
+    """An utterance reached the scene. Verbatim text lives in transcript_messages; the payload
+    carries structure only, so the ledger is not itself a leak channel."""
+
+    event_type: ClassVar[str] = "speech.uttered"
+    speaker_actor_id: uuid.UUID
+    channel: str  # say | whisper
+    language: str = "common"
+    transcript_message_id: uuid.UUID | None = None
+    target_actor_ids: list[uuid.UUID] = Field(default_factory=list)
+    recipient_actor_ids: list[uuid.UUID] = Field(default_factory=list)  # who actually received it
+    claim_count: int = 0
+
+
+class FactCreated(EventPayload):
+    event_type: ClassVar[str] = "fact.created"
+    fact_id: uuid.UUID
+    key: str | None = None
+    canon_status: str
+    sensitivity: str = "public"
+
+
+class FactEstablished(EventPayload):
+    event_type: ClassVar[str] = "fact.established"
+    fact_id: uuid.UUID
+    key: str | None = None
+    reason: str = ""
+
+
+class IdentityLearned(EventPayload):
+    event_type: ClassVar[str] = "identity.learned"
+    actor_id: uuid.UUID
+    entity_id: uuid.UUID
+    known_name: str
+    recognized_as_entity_id: uuid.UUID | None = None
+
+
+class RelationshipSeeded(EventPayload):
+    event_type: ClassVar[str] = "relationship.seeded"
+    source_actor_id: uuid.UUID
+    target_entity_id: uuid.UUID
+    values: dict[str, int] = Field(default_factory=dict)
+
+
+class BeliefSeeded(EventPayload):
+    event_type: ClassVar[str] = "belief.seeded"
+    actor_id: uuid.UUID
+    proposition_key: str
+    belief_type: str
+    confidence: float
+    fact_id: uuid.UUID | None = None
+
+
+class LeakageRejected(EventPayload):
+    """A proposal referenced knowledge outside the speaker's perspective. Recorded for audit;
+    nothing else about the proposal is persisted."""
+
+    event_type: ClassVar[str] = "proposal.rejected_leakage"
+    actor_id: uuid.UUID
+    ref_kind: str
+    ref_id: str
+    reason: str
+
+
+class GoalCreated(EventPayload):
+    event_type: ClassVar[str] = "goal.created"
+    goal_id: uuid.UUID
+    owner_type: str
+    owner_id: uuid.UUID
+    description: str
+    priority: int = 50
+    visibility: str = "private"
+
+
+class GoalUpdated(EventPayload):
+    event_type: ClassVar[str] = "goal.updated"
+    goal_id: uuid.UUID
+    owner_id: uuid.UUID
+    changes: dict[str, Any] = Field(default_factory=dict)
+    reason: str = ""
+
+
+class EmotionChanged(EventPayload):
+    event_type: ClassVar[str] = "emotion.changed"
+    actor_id: uuid.UUID
+    emotion_key: str
+    intensity: float
+    source: str = "proposal"  # proposal | rule | seed
+
+
+class RelationshipChanged(EventPayload):
+    """Every relationship change carries event-linked delta provenance (world-memory §11)."""
+
+    event_type: ClassVar[str] = "relationship.changed"
+    source_actor_id: uuid.UUID
+    target_entity_id: uuid.UUID
+    dimension: str
+    delta: int
+    reason: str = ""
+
+
+class ProposalInvalidated(EventPayload):
+    """An AI proposal was revalidated against current state and rejected (orchestration §18,
+    §34): the target is gone, the item was taken, the scene version moved."""
+
+    event_type: ClassVar[str] = "proposal.invalidated"
+    actor_id: uuid.UUID
+    action_key: str | None = None
+    target: str | None = None
+    reason: str = ""
+    based_on_scene_version: int | None = None
+    fallback_used: bool = False
+
+
+class BeliefFormed(EventPayload):
+    """A belief created from an AI actor's own proposal or inference (never `known`)."""
+
+    event_type: ClassVar[str] = "belief.formed"
+    actor_id: uuid.UUID
+    proposition_key: str
+    belief_type: str
+    confidence: float
+    model_run_id: uuid.UUID | None = None
+
+
+class BeliefAdjusted(EventPayload):
+    """Belief Processor adjustment within ±0.25 of the deterministic default."""
+
+    event_type: ClassVar[str] = "belief.adjusted"
+    actor_id: uuid.UUID
+    belief_id: uuid.UUID
+    confidence_before: float
+    confidence_after: float
+    model_run_id: uuid.UUID | None = None
+    reason: str = ""
+
+
+class AutonomyPaused(EventPayload):
+    """An AI proposal fell under an autonomy domain configured `ask`/`suggest_only`/`blocked`;
+    the engine paused or dropped it regardless of what the model wanted."""
+
+    event_type: ClassVar[str] = "autonomy.paused"
+    actor_id: uuid.UUID
+    domain: str
+    level: str
+    action_key: str | None = None
+    target: str | None = None
+
+
+class CanonDetailAdded(EventPayload):
+    """Post-narration decoration persisted as `latent` canon (canon-extraction-allowlist §2)."""
+
+    event_type: ClassVar[str] = "canon.detail_added"
+    classification: str
+    description: str
+    location_id: uuid.UUID | None = None
+    entity_id: uuid.UUID | None = None
+    model_run_id: uuid.UUID | None = None
+
+
+class CanonDetailEstablished(EventPayload):
+    """A latent detail a later player action referenced (search the barrels)."""
+
+    event_type: ClassVar[str] = "canon.detail_established"
+    description: str
+    location_id: uuid.UUID | None = None
+    entity_id: uuid.UUID | None = None
+
+
+class JournalEntryWritten(EventPayload):
+    event_type: ClassVar[str] = "journal.entry_written"
+    actor_id: uuid.UUID
+    entry_id: uuid.UUID
+    entry_type: str = "session"
+    model_run_id: uuid.UUID | None = None
+
+
+class MemoryCheckpoint(EventPayload):
+    """Memory processing ran (or was deferred) for an actor at a checkpoint."""
+
+    event_type: ClassVar[str] = "memory.checkpoint"
+    actor_id: uuid.UUID
+    reason: str
+    observations: int = 0
+    memories_created: int = 0
+    deferred: bool = False
+
+
+class MemoryCreated(EventPayload):
+    event_type: ClassVar[str] = "memory.created"
+    memory_id: uuid.UUID
+    actor_id: uuid.UUID
+    is_core: bool = False
+    source_event_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class MemoryCompressed(EventPayload):
+    event_type: ClassVar[str] = "memory.compressed"
+    memory_id: uuid.UUID
+    actor_id: uuid.UUID
+    compressed_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
 PAYLOAD_TYPES: dict[str, type[EventPayload]] = {
     cls.event_type: cls
     for cls in (
@@ -266,6 +469,27 @@ PAYLOAD_TYPES: dict[str, type[EventPayload]] = {
         EncounterRoundEnded,
         EncounterEnded,
         ItemCreated,
+        SpeechUttered,
+        FactCreated,
+        FactEstablished,
+        IdentityLearned,
+        RelationshipSeeded,
+        BeliefSeeded,
+        LeakageRejected,
+        MemoryCreated,
+        MemoryCompressed,
+        GoalCreated,
+        GoalUpdated,
+        EmotionChanged,
+        RelationshipChanged,
+        ProposalInvalidated,
+        AutonomyPaused,
+        BeliefFormed,
+        BeliefAdjusted,
+        CanonDetailAdded,
+        CanonDetailEstablished,
+        JournalEntryWritten,
+        MemoryCheckpoint,
     )
 }
 

@@ -12,6 +12,13 @@ from app.persistence.models.actor import (
     Party,
     PartyMembership,
 )
+from app.persistence.models.ai import (
+    ContextItem,
+    ContextSnapshot,
+    DecisionTrace,
+    ModelRun,
+    TurnMetrics,
+)
 from app.persistence.models.base import Base
 from app.persistence.models.campaign import Campaign, Timeline, WorldClock
 from app.persistence.models.entity import Entity, Location, LocationEdge
@@ -22,12 +29,30 @@ from app.persistence.models.event import (
     TranscriptMessage,
     TranscriptRecipient,
 )
+from app.persistence.models.knowledge import (
+    Belief,
+    Claim,
+    EntityIdentityKnowledge,
+    Fact,
+    Observation,
+    Relationship,
+    RelationshipDelta,
+)
 from app.persistence.models.mechanics import (
     ConditionInstanceRow,
     Document,
     Item,
     ItemHistory,
     ResourceStateRow,
+)
+from app.persistence.models.memory import Memory, MemorySource
+from app.persistence.models.projections import EncyclopediaEntry, JournalEntry
+from app.persistence.models.psychology import (
+    ActorAIProfile,
+    EmotionState,
+    Goal,
+    GoalTarget,
+    Plan,
 )
 from app.persistence.models.rules import (
     Action,
@@ -46,6 +71,27 @@ from app.persistence.models.rules import (
 from app.persistence.models.scene import Scene, SceneParticipant
 
 __all__ = [
+    "EncyclopediaEntry",
+    "JournalEntry",
+    "ActorAIProfile",
+    "EmotionState",
+    "Goal",
+    "GoalTarget",
+    "Plan",
+    "ContextItem",
+    "ContextSnapshot",
+    "DecisionTrace",
+    "ModelRun",
+    "TurnMetrics",
+    "Memory",
+    "MemorySource",
+    "Belief",
+    "Claim",
+    "EntityIdentityKnowledge",
+    "Fact",
+    "Observation",
+    "Relationship",
+    "RelationshipDelta",
     "Action",
     "ActionStep",
     "ConditionInstanceRow",

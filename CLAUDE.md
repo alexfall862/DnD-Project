@@ -29,7 +29,9 @@ once per session; then, for each milestone, read only the `## Read` context pack
 | `docs/HARDWARE-TARGET.md` | Inference host and measured profile numbers (filled by the 04b spike). |
 | `backend/` | Python project: FastAPI app in `backend/app/`, Alembic in `backend/migrations/`, tests in `backend/tests/`. |
 | `backend/rulesets/core_adventure/` | Declarative first ruleset (from Milestone 02a). |
-| `scripts/` | Dev scripts; `scripts/spike/` is the throwaway 04b model spike. |
+| `backend/app/seeds/` | The Red Lantern seed (`frostbridge_tavern.py`) shared by tests, `/debug/seed-demo` and the harness. |
+| `backend/app/cli/play.py` | Terminal harness over HTTP (`make play ARGS="--new"`); `/debug …` needs `DEBUG_MODE=true`. |
+| `scripts/` | Dev scripts; `scripts/play.py` launches the harness; `scripts/spike/` is the throwaway 04b model spike. |
 | `frontend/` | Placeholder until Milestone 10. |
 
 ## Environment facts
@@ -46,6 +48,11 @@ once per session; then, for each milestone, read only the `## Read` context pack
   client tool definitions — the provider adapter defeats all three (`docs/DECISIONS.md`,
   "Added at implementation start"). Retry on 503 (+Retry-After) and 409.
 - `FakeModelProvider` drives CI. Real-model behaviour lives in `make eval-local` only.
+- Settings worth knowing: `SPOTLIGHT_VISIBLE_REACTIONS` (AI reaction calls per turn, default 2),
+  `NARRATOR_ENABLED` (default true; the test settings turn both off and tests opt in),
+  `campaign.settings` keys `spotlight`, `narration_style`, `latency_budget`, `player_canon_policy`.
+- Live A9 turn ≈ 36–38 s (interpreter ≈ 10 s, actor 13–21 s, narrator streams within ~4 s);
+  numbers and the design-iteration fixes are in `docs/tasks/milestone-06d-cli-play-harness.md`.
 
 ## Commands
 

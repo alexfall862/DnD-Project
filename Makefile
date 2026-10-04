@@ -79,11 +79,11 @@ test-stress: ## Long-run synthetic campaign (slow)
 eval-local: ## Optional real-model evaluation suite (needs A9_TOKEN)
 	$(RUN) pytest -m eval --eval
 
-seed-demo: ## (Milestone 07) seed the Frostbridge fixture
-	@echo "seed-demo lands in Milestone 07"
+seed-demo: ## Seed the Red Lantern tavern campaign through the debug API (API must be running; full Frostbridge seed lands in 07)
+	curl -s -X POST http://127.0.0.1:8000/api/v1/debug/seed-demo
 
-play: ## (Milestone 06d) CLI play harness
-	@echo "play harness lands in Milestone 06d"
+play: ## Terminal play harness against the running API: make play ARGS="--new" or ARGS="--campaign <id>"
+	$(RUN) python -m app.cli.play $(ARGS)
 
 lint: ## Ruff check
 	$(RUN) ruff check .

@@ -303,8 +303,8 @@ hard `max_tokens` and the prompt asks for brevity:
 
 | role | max_tokens | notes |
 |---|---|---|
-| intent_interpreter | 300 | compound inputs need ~3 intents; `params` only when meaningful |
-| ai_player / npc_actor | 260 | `decision_summary` ≤ 40 words; ≤ 3 `conveys` items; ≤ 2 intentions |
+| intent_interpreter | 320 | compound inputs need ~3 intents; `params` only when meaningful |
+| ai_player / npc_actor | 400 | `decision_summary` ≤ 40 words; ≤ 3 `conveys` items; ≤ 2 intentions (260 truncated GLM output; raised 2026-10-03) |
 | narrator | 320 | streamed; style profile sets the word range |
 | claim_extractor / canon_extractor / memory_processor | 200 | |
 | world_author / world_simulator | 1200 | background or pre-play; not on the turn path |

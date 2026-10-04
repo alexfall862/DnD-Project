@@ -203,10 +203,11 @@ class ActionResolver:
         try:
             self._dispatch(req, adef, out)
         except (EffectError, PositionError, ActionError) as exc:
+            # costs were paid and partial mutations may stand: a failed action is still an
+            # action that resolved, so it gets its ledger event like any other
             out.status = "failed"
             out.reason = str(exc)
             trace.summary = f"failed: {exc}"
-            return out
         if out.status == "resolving":
             out.status = "succeeded"
         out.time_cost_seconds = 0 if self.ctx.in_combat else adef.time_cost_seconds

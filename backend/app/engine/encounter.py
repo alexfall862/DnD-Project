@@ -153,7 +153,9 @@ class Encounter:
             )
 
     def hostile(self, a: str, b: str) -> bool:
-        return self.sides.get(a) != self.sides.get(b)
+        if a not in self.sides or b not in self.sides:
+            return False  # a bystander is nobody's enemy
+        return self.sides[a] != self.sides[b]
 
     def living_sides(self, states: dict[str, ActorState]) -> set[str]:
         out = set()
@@ -167,7 +169,8 @@ class Encounter:
                 or st.has_condition("condition.surrendered")
             ):
                 continue
-            out.add(self.sides[a])
+            if a in self.sides:  # bystanders have no side and do not keep a fight alive
+                out.add(self.sides[a])
         return out
 
     def maybe_end(self, states: dict[str, ActorState]) -> bool:
