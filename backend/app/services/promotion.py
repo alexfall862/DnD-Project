@@ -52,6 +52,22 @@ DIMENSIONS = (
 )
 
 
+def is_generic_name(name: str) -> bool:
+    """A description, not a name: "Irritated merchant", "Dock thief 1" (only the first word
+    capitalised); "Gate guard Hale" and "Mira" are names."""
+    words = [w for w in name.replace("-", " ").split() if w.isalpha()]
+    if not words:
+        return True
+    return not any(w[:1].isupper() for w in words[1:]) and len(words) > 1
+
+
+def proper_name(raw: str) -> str:
+    """One or two capitalised words, nothing else."""
+    words = [w.strip(".,;:'\"") for w in raw.split()][:3]
+    words = [w for w in words if w.isalpha() and w[:1].isupper()]
+    return " ".join(words[:2])
+
+
 class PromotionService:
     def __init__(
         self,
@@ -166,6 +182,8 @@ class PromotionService:
             "temperament": out.temperament,
             "dimensions": {**(profile_before.get("dimensions") or {}), **dims},
         }
+        new_name = proper_name(getattr(out, "personal_name", "") or "")
+        rename = new_name if new_name and is_generic_name(entity.canonical_name or "") else None
         async with EventTransaction(self.session, h.campaign_id, h.timeline_id) as tx:
             await tx.emit(
                 ev.ActorPromoted(
@@ -175,9 +193,13 @@ class PromotionService:
                     goals=len(out.goals),
                     memories=len(out.memories),
                     model_run_id=res.model_run_id,
+                    name=rename,
+                    previous_name=entity.canonical_name if rename else None,
                 ),
                 entities=[(entity.id, "subject")],
             )
+            if rename:
+                entity.canonical_name = rename
             actor.behavior_profile = behavior
             if actor.importance_tier == "background":
                 actor.importance_tier = "standard"  # so their reactions are considered

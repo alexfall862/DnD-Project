@@ -44,10 +44,13 @@ def render_turns(
     names: dict[str, str],
     public_only: bool = False,
     narration_chars: int = 360,
+    include_narration: bool = True,
 ) -> list[str]:
     """One compact paragraph per turn: what the player did, who said what, what was narrated.
     `names` maps actor ids to display names; `public_only` drops whispers, private thoughts
-    and OOC (for a listener who was not addressed)."""
+    and OOC (for a listener who was not addressed). `include_narration=False` leaves earlier
+    narration out: for the narrator and interpreter it is presentation, not fact (play
+    session 2: invented "procedure" lines were fed back every turn and repeated as truth)."""
     out: list[str] = []
     for t in turns:
         r: dict[str, Any] = t.result or {}
@@ -74,7 +77,7 @@ def render_turns(
         ]
         if outcomes:
             parts.append("outcome: " + ", ".join(outcomes))
-        narr = (r.get("narration") or "").strip()
+        narr = (r.get("narration") or "").strip() if include_narration else ""
         if narr:
             parts.append(
                 "narrated: "

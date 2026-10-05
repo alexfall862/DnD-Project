@@ -45,6 +45,7 @@ class PlayBody(BaseModel):
     clarification_id: uuid.UUID | None = None
     roll_request_id: uuid.UUID | None = None
     roll_decision: str | None = None  # "roll" | "reconsider"
+    check_skill: str | None = None  # "Check" mode: the skill the player calls for
 
 
 class PlayOut(BaseModel):
@@ -64,6 +65,8 @@ class PlayOut(BaseModel):
     ooc: str | None = None
     dev_notes: list[str] = Field(default_factory=list)
     roll_request: dict[str, Any] | None = None
+    suggestions: list[str] = Field(default_factory=list)
+    consequences: list[dict[str, Any]] = Field(default_factory=list)
 
 
 async def _handle(
@@ -92,6 +95,7 @@ async def _handle(
         body.clarification_id,
         body.roll_request_id,
         body.roll_decision,
+        body.check_skill,
     )  # type: ignore[arg-type]
     try:
         res = await orch.process_player_input(h, req, emit=emit)
@@ -167,6 +171,8 @@ async def _handle(
         ooc=res.ooc,
         dev_notes=res.dev_notes,
         roll_request=res.roll_request,
+        suggestions=res.suggestions,
+        consequences=res.consequences,
     )
     await _record_feed(session, h, body, out)
     return out

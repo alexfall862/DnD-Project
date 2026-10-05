@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { api } from "../api/client";
-import type { Channel, Clarification, Participant, PartyMember, PlayResult, SceneView } from "../api/types";
+import type { Channel, Clarification, Here, Participant, PartyMember, PlayResult, SceneView, SheetEntry } from "../api/types";
 import * as I from "../components/Icons";
 import { DiceRoll, RollRequestCard } from "../components/Dice";
 import { TraceView } from "../components/Trace";
@@ -23,7 +23,8 @@ const CHANNELS: { id: Channel; label: string; hint: string }[] = [
 export function PlayView() {
   const { campaign, focusActorId, focusName, dev, version, reloadCampaign } = useApp();
   const [rolling, setRolling] = useState<string | null>(null);
-  const { feed, feedError, busy, send } = useTurns();
+  const { feed, feedError, busy, send, setDraft } = useTurns();
+  const [skills, setSkills] = useState<SheetEntry[]>([]);
   const [scene, setScene] = useState<SceneView | null>(null);
   const [party, setParty] = useState<PartyMember[]>([]);
   const [sceneError, setSceneError] = useState<string | null>(null);
@@ -40,6 +41,7 @@ export function PlayView() {
       (e: Error) => setSceneError(e.message),
     );
     api.party(cid, focusActorId).then(setParty, () => setParty([]));
+    api.sheet(focusActorId).then((sh) => setSkills(sh.skills), () => setSkills([]));
   }, [cid, focusActorId, version]);
 
   // speaker labels: the names the focus actor knows (scene participants, then party)
@@ -67,15 +69,13 @@ export function PlayView() {
   const others = (scene?.participants ?? []).filter((p) => !p.is_self && p.actor_id);
   return (
     <div className="play">
-      <div className="scene-strip" aria-label="Current scene">
-        <span className="place">{scene?.location_known_as ?? "Somewhere unfamiliar"}</span>
-        {scene?.your_zone && <span className="chip">{scene.your_zone}</span>}
-        <span className="muted">
-          {others.length ? `with ${others.map((p) => p.known_as).join(", ")}` : "alone"}
-        </span>
-        {sceneError && <span className="chip bad">{sceneError}</span>}
-        {feedError && <span className="chip bad">history: {feedError}</span>}
-      </div>
+      <HereStrip
+        actorId={focusActorId}
+        version={version}
+        fallback={scene?.location_known_as ?? null}
+        others={others.map((p) => p.known_as)}
+        errors={[sceneError, feedError ? `history: ${feedError}` : null]}
+      />
       <div className="feed" ref={feedRef}>
         <div className="feed-inner">
           {feed.length === 0 && (
@@ -92,6 +92,7 @@ export function PlayView() {
               dev={dev}
               answerable={i === feed.length - 1 && !busy}
               rolling={rolling !== null && rolling === t.result?.roll_request?.id}
+              onTry={(t) => setDraft(t)}
               onAnswer={(answer) =>
                 t.clarification &&
                 send(answer, t.input.channel, [], t.clarification.clarification_id)
@@ -118,8 +119,97 @@ export function PlayView() {
         busy={busy}
         others={others}
         partyIds={party.map((m) => m.actor_id)}
-        onSend={send}
+        skills={skills}
+        onSend={(text, channel, targets, checkSkill) => send(text, channel, targets, undefined, undefined, checkSkill)}
       />
+    </div>
+  );
+}
+
+// ---- where you are -------------------------------------------------------------------------------
+
+/** The scene bar: where you stand, who is where, the ways out and what stands in the way, from
+ * the focus character's own perspective (GET /here; play session 2 asked for it). */
+function HereStrip({
+  actorId,
+  version,
+  fallback,
+  others,
+  errors,
+}: {
+  actorId: string;
+  version: number;
+  fallback: string | null;
+  others: string[];
+  errors: (string | null)[];
+}) {
+  const [here, setHere] = useState<Here | null>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    api.here(actorId).then(setHere, () => setHere(null));
+  }, [actorId, version]);
+  const mine = here?.zones.find((z) => z.you_are_here);
+  const blocked = here?.exits.filter((e) => e.blocked_by) ?? [];
+  return (
+    <div className="scene-strip here" aria-label="Where you are">
+      <button type="button" className="here-toggle" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
+        <span className="place">{here?.location ?? fallback ?? "Somewhere unfamiliar"}</span>
+        {mine && <span className="chip">{mine.name}</span>}
+        <span className="muted">{others.length ? `with ${others.join(", ")}` : "alone"}</span>
+        {here && here.situations.length > 0 && <span className="chip warn">{here.situations.length} going on</span>}
+        {blocked.length > 0 && (
+          <span className="chip bad">
+            {blocked.length} way{blocked.length > 1 ? "s" : ""} blocked
+          </span>
+        )}
+        <span className="muted small">{open ? "▲" : "▼"}</span>
+      </button>
+      {errors
+        .filter((e): e is string => !!e)
+        .map((e, i) => (
+          <span key={i} className="chip bad">
+            {e}
+          </span>
+        ))}
+      {open && here && (
+        <div className="here-detail" data-testid="here">
+          <div>
+            <span className="label">Around you</span>
+            <ul>
+              {here.zones.map((z) => (
+                <li key={z.key} className={z.you_are_here ? "you" : undefined}>
+                  <strong>{z.name}</strong>
+                  {z.you_are_here ? " (you are here)" : z.adjacent ? " (a few steps away)" : ""}
+                  {z.people.length > 0 && <span> · {z.people.join(", ")}</span>}
+                  {z.features.length > 0 && <span className="muted"> · {z.features.join("; ")}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div>
+            <span className="label">Ways out</span>
+            <ul>
+              {here.exits.length === 0 && <li className="muted">None that you know of.</li>}
+              {here.exits.map((e) => (
+                <li key={e.location_id}>
+                  {e.known_as} <span className="muted">· {e.travel_minutes} min</span>
+                  {e.blocked_by && <span className="chip bad">blocked: {e.blocked_by}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+          {here.situations.length > 0 && (
+            <div>
+              <span className="label">Going on</span>
+              <ul>
+                {here.situations.map((x, i) => (
+                  <li key={i}>{x.text}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -260,6 +350,7 @@ export function TurnCard({
   rolling = false,
   onAnswer,
   onRoll,
+  onTry,
 }: {
   turn: FeedTurn;
   names: Map<string, string>;
@@ -269,6 +360,7 @@ export function TurnCard({
   rolling?: boolean;
   onAnswer: (answer: string) => void;
   onRoll?: (decision: "roll" | "reconsider", auto?: boolean) => void;
+  onTry?: (text: string) => void;
 }) {
   const [traceOpen, setTraceOpen] = useState(false);
   const r = turn.result;
@@ -319,7 +411,27 @@ export function TurnCard({
           </div>
         ))}
 
+      {(r?.consequences ?? []).length > 0 && (
+        <div className="consequences" aria-label="What changed">
+          {(r?.consequences ?? []).map((c, i) => (
+            <span key={i} className="consequence">
+              → {c.by ? `${c.by}: ` : ""}
+              {c.text}
+            </span>
+          ))}
+        </div>
+      )}
+
       {r?.ooc && <div className="ooc-reply">{r.ooc}</div>}
+      {(r?.suggestions ?? []).length > 0 && (
+        <div className="row suggestions" aria-label="Things to try">
+          {(r?.suggestions ?? []).map((t, i) => (
+            <button key={i} type="button" className="btn small try" onClick={() => onTry?.(t)} title="Put this in the composer">
+              Try: {t}
+            </button>
+          ))}
+        </div>
+      )}
 
       {r?.roll_request &&
         (answerable && onRoll ? (
@@ -388,7 +500,7 @@ export function TurnCard({
 function Mechanics({ result, dev, fresh }: { result: PlayResult; dev: boolean; fresh: boolean }) {
   const lines: JSX.Element[] = [];
   result.actions.forEach((a, i) => {
-    const failed = a.status === "invalid" || a.status === "failed";
+    const failed = ["invalid", "failed", "blocked", "noop"].includes(a.status);
     lines.push(
       <span key={`a${i}`} className={failed ? "muted" : undefined}>
         ⚙ {a.action.replace(/^(action|social)\./, "").replace(/_/g, " ")}
@@ -471,15 +583,20 @@ function Composer({
   busy,
   others,
   partyIds,
+  skills,
   onSend,
 }: {
   busy: boolean;
   others: Participant[];
   partyIds: string[];
-  onSend: (text: string, channel: Channel, targets: Participant[]) => void | Promise<void>;
+  skills: SheetEntry[];
+  onSend: (text: string, channel: Channel, targets: Participant[], checkSkill?: string) => void | Promise<void>;
 }) {
-  const [text, setText] = useState("");
+  const { draft: text, setDraft: setText } = useTurns();
   const [channel, setChannel] = useState<Channel>("auto");
+  // Check mode: name the skill and say what you attempt (play session 2: checks were hard to
+  // reach through free text)
+  const [check, setCheck] = useState<string | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
   const ref = useRef<HTMLTextAreaElement>(null);
   const present = others.filter((o) => o.actor_id);
@@ -487,8 +604,9 @@ function Composer({
   const partyHere = present.filter((o) => partyIds.includes(o.actor_id as string));
   const allParty = partyHere.length > 0 && partyHere.every((p) => picked.includes(p.actor_id as string));
   // whispers need someone to whisper to; speech may name who it is for (heard by all)
-  const needsTarget = channel === "whisper" && targets.length === 0;
-  const picking = channel === "whisper" || channel === "say";
+  // a whisper with nobody picked goes to the companions at your side
+  const needsTarget = check === null && channel === "whisper" && targets.length === 0 && partyHere.length === 0;
+  const picking = check !== null || channel === "whisper" || channel === "say";
 
   useEffect(() => {
     const el = ref.current;
@@ -514,7 +632,8 @@ function Composer({
   const submit = () => {
     const t = text.trim();
     if (!t || busy || needsTarget) return;
-    void onSend(t, channel, picking ? targets : []);
+    if (check) void onSend(t, "do", targets, check);
+    else void onSend(t, channel, picking ? targets : []);
     setText("");
   };
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -523,8 +642,11 @@ function Composer({
       submit();
     }
   };
-  const hint =
-    channel === "say" && targets.length
+  const skillName = skills.find((x) => x.key === check)?.name ?? "";
+  const aimed = targets.length ? ` (aimed at ${targets.map((t) => t.known_as).join(", ")})` : "";
+  const hint = check
+    ? `What do you attempt with ${skillName || "this skill"}?${aimed}`
+    : channel === "say" && targets.length
       ? `Said aloud to ${targets.map((t) => t.known_as).join(", ")} (everyone present hears)`
       : channel === "whisper" && targets.length
         ? `Only ${targets.map((t) => t.known_as).join(", ")} will hear`
@@ -543,9 +665,10 @@ function Composer({
             <button
               key={c.id}
               type="button"
-              aria-pressed={channel === c.id}
+              aria-pressed={channel === c.id && check === null}
               onClick={() => {
-                if (c.id !== channel) setPicked([]); // listeners belong to one way of speaking
+                if (c.id !== channel || check !== null) setPicked([]); // listeners belong to one way of speaking
+                setCheck(null);
                 setChannel(c.id);
               }}
               title={c.hint}
@@ -553,14 +676,40 @@ function Composer({
               {c.label}
             </button>
           ))}
+          {skills.length > 0 && (
+            <button
+              type="button"
+              aria-pressed={check !== null}
+              title="Make a check: pick a skill, then say what you attempt"
+              onClick={() => {
+                setPicked([]);
+                setCheck((c) => (c === null ? skills[0].key : null));
+              }}
+            >
+              Check
+            </button>
+          )}
         </div>
+        {check !== null && (
+          <div className="channels listeners" role="group" aria-label="Skill">
+            <span className="muted small">Skill</span>
+            <select value={check} onChange={(e) => setCheck(e.target.value)} aria-label="Skill to check">
+              {skills.map((x) => (
+                <option key={x.key} value={x.key}>
+                  {x.name}
+                  {x.value ? ` (+${x.value})` : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         {picking && present.length > 0 && (
           <div
             className="channels listeners"
             role="group"
-            aria-label={channel === "whisper" ? "Whisper to" : "Speak to"}
+            aria-label={check ? "Aimed at" : channel === "whisper" ? "Whisper to" : "Speak to"}
           >
-            <span className="muted small">{channel === "whisper" ? "Whisper to" : "To"}</span>
+            <span className="muted small">{check ? "At" : channel === "whisper" ? "Whisper to" : "To"}</span>
             {partyHere.length > 1 && (
               <button type="button" aria-pressed={allParty} onClick={toggleParty}>
                 Party

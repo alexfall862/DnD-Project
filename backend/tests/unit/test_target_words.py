@@ -86,8 +86,12 @@ async def test_the_players_words_say_who_comes_along() -> None:
     assert await who("We head to the Red Lantern, all three of us.") == {elara, tomas}
     assert await who("Elara and I go to the shuttered warehouse.") == {elara}
     assert await who("We go over to the guard house.") == {elara, tomas}
-    assert await who("I go to the guard house.") == set()
-    assert await who("Tomas, would you look at the guard house records?") == set()
+    # the party travels together by default (DECISIONS 10d); words leave people behind
+    assert await who("I go to the guard house.") == {elara, tomas}
+    assert await who("I go to the guard house alone.") == set()
+    assert await who("We go to the guard house without Tomas.") == {elara}
+    assert await who("I head to the tavern; Tomas stays with the wagon.") == {elara}
+    assert await who("I take Tomas to the tavern.") == {tomas}
 
 
 def test_the_models_ref_words_find_the_person_before_the_sentence_finds_a_place() -> None:

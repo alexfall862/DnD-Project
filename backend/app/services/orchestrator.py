@@ -58,6 +58,7 @@ from app.services.narration import NarrationService
 from app.services.observations import ObservationService
 from app.services.perspective import PerspectiveService, UnauthorizedPerspective
 from app.services.player_canon import DEFAULT_POLICY, PlayerCanonService
+from app.services.prose import prose_only
 from app.services.scenes import SceneService
 from app.services.simulation import SimulationService
 from app.services.speech import ConveysItem, LeakageError, SpeechService
@@ -68,6 +69,7 @@ from app.services.vocab import (
     READ_TYPES,
     SOCIAL_SKILLS,
     SPEECH_TYPES,
+    TRADE_TYPES,
     canonical_kind,
 )
 from app.services.world import CampaignHandle, WorldError, WorldService
@@ -126,6 +128,9 @@ class PlayRequest:
     clarification_id: uuid.UUID | None = None
     roll_request_id: uuid.UUID | None = None  # answering a called-for check
     roll_decision: str | None = None  # "roll" | "reconsider"
+    # the player asks for a check directly ("Check" composer mode): the skill key, and the
+    # text says what they attempt; the adjudicator rules with that skill required
+    check_skill: str | None = None
 
 
 @dataclass
@@ -149,6 +154,20 @@ class PlayResult:
     dev_notes: list[str] = field(default_factory=list)
     # a check the game called for, waiting on the player (manual dice): see PendingRoll
     roll_request: dict[str, Any] | None = None
+    # things the player could do next, offered by the table assistant ("TRY:" lines)
+    suggestions: list[str] = field(default_factory=list)
+    # what changed in the world because of this turn (DECISIONS 10d), as the player sees it
+    consequences: list[dict[str, Any]] = field(default_factory=list)
+
+
+TRY_RE = re.compile(r"^\s*(?:[-*]\s*)?TRY:\s*(.+?)\s*$", re.I | re.M)
+
+
+def split_suggestions(answer: str) -> tuple[str, list[str]]:
+    """The table assistant's answer and its actionable suggestions (at most three)."""
+    tries = [t.strip().strip('"').strip() for t in TRY_RE.findall(answer or "")]
+    body = TRY_RE.sub("", answer or "").strip()
+    return body, [t for t in dict.fromkeys(tries) if t][:3]
 
 
 def _natural(raw: Any) -> int | None:
@@ -189,6 +208,15 @@ def narration_outcomes(result: PlayResult) -> list[str]:
             out.append(f"{label}: succeeded")
         elif status == "failed":
             out.append(f"{label}: attempted and FAILED; it did not achieve its aim")
+        elif status == "noop":
+            out.append(
+                f"{what}: nothing to do, you are already there; nobody stops or refuses you, "
+                "do not narrate an obstacle"
+            )
+        elif status == "blocked":
+            out.append(
+                f"{label}: did NOT happen, {a.get('reason')}; narrate being stopped by exactly that"
+            )
         elif status in ("invalid", "rejected", "cancelled"):
             reason = str(a.get("reason") or "").strip()
             out.append(
@@ -198,6 +226,9 @@ def narration_outcomes(result: PlayResult) -> list[str]:
             )
         elif status:
             out.append(f"{label}: {status}")
+    for c in result.consequences:
+        if c.get("ok") and c.get("text"):
+            out.append(f"as a result (binding, it has happened): {c['text']}")
     if not result.actions and any(
         n.startswith("(OOC) ruling rejected")
         for n in [*result.mechanical_notices, *result.dev_notes]
@@ -300,6 +331,14 @@ class SessionOrchestrator:
         self.promotion = PromotionService(
             session, compiler=self.compiler, runner=self.runner, memory=self.memory
         )
+        from app.services.consequences import ConsequenceService
+        from app.services.situations import SituationService
+
+        self.consequences = ConsequenceService(
+            session, engine, actions=self.actions, scenes=self.scenes
+        )
+        self.situations = SituationService(session)
+        self._turn_cands: list[Candidate] = []
 
     # -- entry -------------------------------------------------------------------------------------
 
@@ -309,6 +348,7 @@ class SessionOrchestrator:
         emit = emit or (lambda name, payload: None)
         self.runner.observer = emit  # model-call progress rides the turn stream
         self._ruling_cache: dict[str, dict] = {}  # rulings made this turn, by the attempt text
+        self._forced_skill: str | None = None  # a check the player called for (Check mode)
         campaign = await self.session.get(Campaign, h.campaign_id)
         turn = Turn(
             h, budget=budget_from_settings(self.settings, campaign.settings if campaign else None)
@@ -316,6 +356,7 @@ class SessionOrchestrator:
         emit("accepted", {"turn_id": str(turn.turn_id)})
         self.current_turn_id = turn.turn_id
         result = PlayResult(turn.turn_id)
+        self._turn_result = result
         first_scene = await self.perspective.repo.current_scene(req.actor_id)
         if first_scene is None or not self._in_combat(first_scene):
             turn.inapplicable.add("use_fallback_policy_in_combat")  # the ladder skips it
@@ -376,15 +417,48 @@ class SessionOrchestrator:
             + ", ".join(d.name for d in rs.skills.values())
             + ". Checks roll 1d20 + attribute + skill against a difficulty: "
             + ", ".join(f"{k} {v}" for k, v in rs.manifest.difficulty_scale.items())
-            + "."
+            + ". Prices in coin: "
+            + ", ".join(f"{g.name} {g.price}" for g in rs.goods.values())
+            + ". Buying and selling happen in play (say what you buy and from whom); haggling "
+            "is a Persuasion check."
         )
         log = await self._scene_log(req.actor_id, scene, limit=6)
+        # the conversation with the table so far: a "Yes" answers the last suggestion (play
+        # session 2: the assistant had no memory of its own offer and failed on "Yes")
+        from app.persistence.models import PlayerTurn
+
+        earlier = (
+            (
+                await self.session.execute(
+                    select(PlayerTurn)
+                    .where(PlayerTurn.actor_id == req.actor_id)
+                    .order_by(PlayerTurn.created_at.desc())
+                    .limit(12)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        talk = [
+            f'Player: "{t.input_text[:300]}"\n'
+            f'You answered: "{str((t.result or {}).get("ooc"))[:500]}"'
+            for t in reversed(earlier)
+            if (t.result or {}).get("channel") == "ooc" and (t.result or {}).get("ooc")
+        ][-3:]
+        situation = (
+            ("Your conversation with the player so far:\n" + "\n".join(talk) + "\n\n")
+            if talk
+            else ""
+        ) + f'The player asks (out of character): "{text}"'
+        sit_lines = await self._situation_lines(req.actor_id)
+        if sit_lines:
+            situation += "\n\nSituation (recorded, true right now):\n- " + "\n- ".join(sit_lines)
         ctx = await self.compiler.compile(
             h,
             "table_assistant",
             actor_id=req.actor_id,
             purpose="answer an out-of-character question",
-            situation=f'The player asks (out of character): "{text}"',
+            situation=situation,
             extra_sections={
                 "rules_public": rules,
                 **({"recent_turns": "This scene so far:\n- " + "\n- ".join(log)} if log else {}),
@@ -398,11 +472,16 @@ class SessionOrchestrator:
             completion_tokens=res.completion_tokens,
             context_tokens=ctx.estimated_tokens,
         )
-        answer = (res.text or "").strip() if res.status in ("ok", "repaired") else ""
+        answer = prose_only(res.text) if res.status in ("ok", "repaired") else ""
         return answer or "The table could not answer that just now; try asking again."
 
     async def _scene_log(
-        self, actor_id: uuid.UUID, scene: Scene | None, *, limit: int = 6
+        self,
+        actor_id: uuid.UUID,
+        scene: Scene | None,
+        *,
+        limit: int = 6,
+        include_narration: bool = True,
     ) -> list[str]:
         """This scene so far, as this player saw it (app/services/scene_log.py)."""
         from app.services.scene_log import render_turns, scene_turns
@@ -413,7 +492,17 @@ class SessionOrchestrator:
         names = {str(p.actor_id): p.known_as for p in (view.participants if view else [])}
         me = await self.perspective.repo.self_name(actor_id) or "You"
         turns = await scene_turns(self.session, actor_id, scene, limit=limit)
-        return render_turns(turns, player_name=me, names=names)
+        return render_turns(turns, player_name=me, names=names, include_narration=include_narration)
+
+    async def _situation_lines(self, actor_id: uuid.UUID) -> list[str]:
+        """The recorded situations the focus actor perceives, named as they know people."""
+        sits = await self.situations.visible_to(actor_id)
+        if not sits:
+            return []
+        view = await self.perspective.scene_view(actor_id)
+        names = {p.actor_id: p.known_as for p in (view.participants if view else []) if p.actor_id}
+        names[actor_id] = "you"
+        return await self.situations.lines(sits, names, refs=False)
 
     async def _keep_audit_after_failure(self, turn: Turn, exc: Exception) -> None:
         """The turn's world changes roll back; its audit stays: model runs, the contexts they
@@ -584,10 +673,13 @@ class SessionOrchestrator:
                 stale.status = "lapsed"
         result.channel = channel
         channel_in = channel
+        self._channel_in = channel
 
         if channel == "ooc":
             emit("stage", {"stage": "ooc", "label": "Asking the table"})
-            result.ooc = await self._ooc_answer(h, req, text, scene, turn)
+            result.ooc, result.suggestions = split_suggestions(
+                await self._ooc_answer(h, req, text, scene, turn)
+            )
             result.versions = await self._versions(h, scene)
             return
         if channel == "private":
@@ -610,15 +702,24 @@ class SessionOrchestrator:
 
         # 3–4: intent context + Intent Interpreter
         hap = Happenings(req.actor_id, in_combat=self._in_combat(scene))
+        self._turn_hap = hap
         candidates = await self._candidates(h, req.actor_id, scene)
+        self._turn_cands = candidates
         explicit_speech = channel in ("say", "whisper")  # /say, /whisper or request channel
         emit("stage", {"stage": "interpreting", "label": "Reading what you do"})
         if resume is not None:
             from app.ai.roles import IntentInterpreterOut
 
             intent = IntentInterpreterOut.model_validate(resume.intent)
+            for it in intent.intents:
+                self._forced_skill = self._forced_skill or it.params.get("called_check")
+        elif req.check_skill:
+            intent = self._called_check_intent(req, text, candidates)
+            channel = "do"
+            result.channel = "do"
         else:
             intent = await self._interpret(h, req, text, channel, candidates, turn)
+            intent = await self._unless_stationary(h, req, text, channel, candidates, turn, intent)
         emit("stage", {"stage": "resolving", "label": "Resolving actions"})
         if channel == "auto":
             channel = intent.channel
@@ -648,7 +749,9 @@ class SessionOrchestrator:
             intent.intents = kept
         if channel == "ooc":
             emit("stage", {"stage": "ooc", "label": "Asking the table"})
-            result.ooc = await self._ooc_answer(h, req, text, scene, turn)
+            result.ooc, result.suggestions = split_suggestions(
+                await self._ooc_answer(h, req, text, scene, turn)
+            )
             result.versions = await self._versions(h, scene)
             return
 
@@ -666,6 +769,16 @@ class SessionOrchestrator:
                 await self._raise_clarification(
                     h, req, scene, text, f"Which {item['kind']} do you mean?", item["options"], turn
                 )
+        # a social attempt aimed at nobody in particular is aimed at whoever the player is
+        # talking with (play session 3: "Convince the merchant…" matched nobody, so the
+        # merchant never learned he had been persuaded)
+        for item in resolved:
+            kind = canonical_kind(item["intent"].action_type, channel)
+            if kind in SOCIAL_SKILLS and item["candidate"] is None:
+                partner = await self._conversation_partner(req.actor_id, scene, candidates, text)
+                if partner is not None:
+                    item["candidate"] = partner
+                    turn.notes.append(f"social target: the conversation partner {partner.ref}")
 
         # dice (manual): a check the game calls for pauses here, before anything happens
         dice_mode = ((campaign.settings or {}).get("dice_mode") if campaign else None) or getattr(
@@ -782,6 +895,9 @@ class SessionOrchestrator:
                     social_done.add(f"{kind}:{target}")
                     await self._social(h, req, scene, kind, step, turn, result, emit, hap, text)
                 continue
+            if kind in TRADE_TYPES:
+                await self._trade(h, req, scene, kind, step, text, turn, result, hap)
+                continue
             if kind in SPEECH_TYPES or (
                 channel in ("say", "whisper") and kind in ("say", "whisper", "talk")
             ):
@@ -816,6 +932,22 @@ class SessionOrchestrator:
             outcome = await self._act(
                 h, req, scene, kind, step, candidates, turn, result, emit, text
             )
+            cand = step["candidate"]
+            if (
+                self._forced_skill
+                and outcome is not None
+                and cand is not None
+                and cand.kind == "actor"
+                and outcome.status in ("succeeded", "failed")
+            ):
+                # a called check aimed at someone lands on them like a social attempt
+                chk = next((s for s in outcome.steps if s.kind == "check"), None)
+                margin = (
+                    int(chk.detail.get("total", 0)) - int(chk.detail.get("target", 0)) if chk else 0
+                )
+                label = self.engine.ruleset.skills[self._forced_skill].name
+                hap.social[uuid.UUID(cand.id)] = (label, outcome.status == "succeeded", margin)
+                hap.addressed.add(uuid.UUID(cand.id))
             if outcome is not None and outcome.status != "invalid":
                 last_action = outcome.request.action_key
                 if outcome.request.target and outcome.request.action_key == "action.attack":
@@ -846,7 +978,12 @@ class SessionOrchestrator:
         engaged = set(hap.addressed) | set(hap.social) | set(hap.attacked)
         if engaged and not hap.in_combat:
             fresh_scene = await self.session.get(Scene, scene.id)
-            for aid in await self.promotion.note_engagement(fresh_scene, engaged):
+            due = await self.promotion.note_engagement(fresh_scene, engaged)
+            order = {a: i for i, a in enumerate(hap.address_order)}
+            # one promotion per turn (each is a full model call; play session 2: two promotions
+            # took 40 s and the reactions they were for were cut by the turn budget); the rest
+            # are still due on their next engagement
+            for aid in sorted(due, key=lambda a: order.get(a, 99))[:1]:
                 emit("stage", {"stage": "promoting", "label": "Someone comes to life"})
                 result.dev_notes.append(
                     await self.promotion.promote(
@@ -879,7 +1016,8 @@ class SessionOrchestrator:
         result.visible_rolls = await self._visible_rolls(events)
         for n in await self._notices(req.actor_id, events):
             # bare renderings of the player's own act carry nothing the player didn't do
-            (result.dev_notes if n in GENERIC_NOTICES else result.mechanical_notices).append(n)
+            dev = n in GENERIC_NOTICES or n.startswith("(claim) ")
+            (result.dev_notes if dev else result.mechanical_notices).append(n)
         result.state_changes = await self._state_changes(req.actor_id, hp_before)
         result.versions = await self._versions(h, scene)
         turn.mark_first_output()
@@ -899,6 +1037,35 @@ class SessionOrchestrator:
         await self._checkpoints(h, req, scene, events, turn)
 
     # -- channel / clarification ----------------------------------------------------------------
+
+    def _called_check_intent(
+        self, req: PlayRequest, text: str, cands: list[Candidate]
+    ) -> IntentInterpreterOut:
+        """Check mode: the player names the skill and says what they attempt; no interpreter
+        call (play session 2: checks were hard to reach through free text). The attempt is
+        ruled on with that skill required, aimed at the person picked, if any."""
+        rs = self.engine.ruleset
+        raw = (req.check_skill or "").strip().lower().replace(" ", "_")
+        skill = raw if raw.startswith("skill.") else f"skill.{raw}"
+        if skill not in rs.skills:
+            raise WorldError(f"unknown skill {req.check_skill!r}")
+        self._forced_skill = skill
+        by_id = {c.id: c for c in cands if c.kind == "actor"}
+        target = next((by_id[str(t)] for t in req.target_actor_ids if str(t) in by_id), None)
+        return IntentInterpreterOut.model_validate(
+            {
+                "channel": "do",
+                "confidence": 1,
+                "intents": [
+                    {
+                        "order": 1,
+                        "action_type": "other",
+                        "target_ref": target.ref if target else None,
+                        "params": {"called_check": skill},
+                    }
+                ],
+            }
+        )
 
     @staticmethod
     def _parse_prefix(text: str, channel: str) -> tuple[str, str]:
@@ -1048,13 +1215,23 @@ class SessionOrchestrator:
             short=turn.degraded("short_narrator_prompt"),
             compressed=compressed,
             outcomes=narration_outcomes(result),
-            recent=await self._scene_log(req.actor_id, scene),
+            recent=await self._scene_log(req.actor_id, scene, include_narration=False),
+            situation_lines=await self._situation_lines(req.actor_id),
         )
         try:
             narration, _run = await self.narration.narrate(h, bundle, turn, emit)
         except Exception as exc:  # noqa: BLE001 - narration is presentation; never lose the turn
             turn.notes.append(f"narrator error: {type(exc).__name__}: {exc}")
             narration = None
+        if narration:
+            narration = await self._drop_repeated_quotes(
+                req.actor_id, scene, bundle, narration, result
+            )
+            narration, cut = drop_unspoken_quotes(narration, bundle.dialogue, bundle.living)
+            for c_ in cut:
+                result.dev_notes.append(
+                    f"narration voiced a living character; removed: {c_[:120]!r}"
+                )
         result.narration = narration
         if narration:
             # narration may only quote what was actually said this turn (dev check; the
@@ -1070,6 +1247,26 @@ class SessionOrchestrator:
                 turn.extra["canon"] = await self.narration.extract_canon(
                     h, fresh, req.actor_id, narration, turn
                 )
+
+    async def _drop_repeated_quotes(
+        self, actor_id: uuid.UUID, scene: Scene, bundle: Any, narration: str, result: PlayResult
+    ) -> str:
+        """A sentence that quotes someone's line from an earlier turn, not said this turn, is
+        removed (play session 2: the merchant "answered" a question put to the guards with his
+        own words from three turns before)."""
+        from app.services.scene_log import scene_turns
+
+        earlier: list[str] = []
+        for t in await scene_turns(self.session, actor_id, scene, limit=10):
+            for sp in (t.result or {}).get("speakers", []) or []:
+                if sp.get("text") and str(sp.get("actor_id")) != str(actor_id):
+                    earlier.append(str(sp["text"]).strip().lower())
+        if not earlier:
+            return narration
+        text, removed = drop_repeated_quotes(narration, bundle.dialogue, earlier)
+        for r_ in removed:
+            result.dev_notes.append(f"narration repeated an earlier line; removed: {r_[:120]!r}")
+        return text
 
     async def _checkpoints(
         self,
@@ -1171,15 +1368,17 @@ class SessionOrchestrator:
         return turn.summary()
 
     async def _reaction_situation(self, actor_id: uuid.UUID, hap: Happenings) -> str:
-        """How this actor was addressed and who else heard, from the actor's own perspective
-        (A9 slice: a whispered question reached Mira as "something happened", so she could not
-        tell it from a public one and evaded as if the captain were listening)."""
+        """How this actor was addressed, who else heard, what was done toward them, how a
+        social attempt on them landed, and what the rules already settled this turn, from the
+        actor's own perspective (A9 slice: a whispered question reached Mira as "something
+        happened"; play session 3: a successful charm with no spoken words reached the merchant
+        as "something happened", so he refused it)."""
         generic = (
             "Something just happened in the scene that concerns you (see your observations "
             "and heard dialogue). React as your character: speak, act, or do nothing."
         )
         view = await self.perspective.scene_view(actor_id)
-        if view is None or not hap.speech_results:
+        if view is None:
             return generic
         by_actor = {str(p.actor_id): p.known_as for p in view.participants if p.actor_id}
         lines: list[str] = []
@@ -1203,17 +1402,32 @@ class SessionOrchestrator:
                     line += f" Everyone present heard it, including {', '.join(others)}."
                 line += " Anything you say aloud, they will hear too."
             lines.append(line)
+        player = by_actor.get(str(hap.acting_actor), "someone")
+        if actor_id in hap.gestures:
+            lines.append(f"{player} {hap.gestures[actor_id]} (an action toward you, no words).")
         if actor_id in hap.social:
             label, convincing, margin = hap.social[actor_id]
-            lines.append(
-                f"They are making a {label} attempt on you. The engine's roll says it was "
-                + (
-                    "convincing" + (" — very" if margin >= 5 else "")
-                    if convincing
-                    else "unconvincing" + (" — badly" if margin <= -5 else "")
+            if convincing:
+                lines.append(
+                    f"{player} made a {label} attempt on you and the engine's roll says it was "
+                    + ("very " if margin >= 5 else "")
+                    + "convincing. You MUST give real ground now: grant something concrete "
+                    "(tell what they asked, agree to their request, ease your price, let them "
+                    "pass), with a matching consequence, within what your character would ever "
+                    "do. Do not refuse outright."
                 )
-                + ". Let that shape your answer: a convincing appeal should move you, an "
-                "unconvincing one should not, within what your character would ever do."
+            else:
+                lines.append(
+                    f"{player} made a {label} attempt on you and the engine's roll says it was "
+                    + ("badly " if margin <= -5 else "")
+                    + "unconvincing. It should not move you."
+                )
+        done = getattr(self, "_turn_result", None)
+        settled = [c["text"] for c in (done.consequences if done else []) if c.get("text")]
+        if settled:
+            lines.append(
+                "Already settled this turn by the rules (it has happened; act consistently, "
+                "never contradict it): " + "; ".join(settled)
             )
         if not lines:
             return generic
@@ -1335,7 +1549,11 @@ class SessionOrchestrator:
                 fresh.state = {**fresh.state, "spotlight": ledger.to_dict()}
                 turn.notes.append(f"spotlight: {d.actor_id} compressed")
                 continue
-            applied = await self.ai.apply(h, scene.id, d, turn, emit)
+            hap = getattr(self, "_turn_hap", None)
+            won = bool(hap and d.actor_id in hap.social and hap.social[d.actor_id][1])
+            applied = await self.ai.apply(
+                h, scene.id, d, turn, emit, focus_actor_id=req.actor_id, must_concede=won
+            )
             applied_all.append(applied)
             turn.notes.extend(f"{d.actor_id}: {n}" for n in applied.notes)
             if applied.rejected:
@@ -1345,6 +1563,30 @@ class SessionOrchestrator:
                 ledger = SpotlightLedger.from_dict(fresh.state.get("spotlight"))
                 ledger.note_visible(ai_to_ai=ai_to_ai)
                 fresh.state = {**fresh.state, "spotlight": ledger.to_dict()}
+            for act in applied.actions:
+                if act.get("action") == "travel" and str(req.actor_id) in (act.get("with") or []):
+                    who = next(
+                        (c.known_as for c in self._turn_cands if c.id == str(d.actor_id)),
+                        "someone",
+                    )
+                    result.consequences.append(
+                        {
+                            "kind": "escort",
+                            "ok": True,
+                            "text": f"You go along with {who}, as agreed.",
+                            "reason": "",
+                            "source": "engine",
+                        }
+                    )
+            for x in applied.consequences:
+                if x.ok and x.text:
+                    who = next(
+                        (c.known_as for c in self._turn_cands if c.id == str(d.actor_id)),
+                        "someone",
+                    )
+                    result.consequences.append(
+                        {**x.to_dict(), "source": "actor", "by": who, "text": x.text}
+                    )
             if applied.speech and str(req.actor_id) in applied.speech["recipients"]:
                 line = {k: v for k, v in applied.speech.items() if k != "claims"}
                 result.speakers.append(line)
@@ -1436,7 +1678,17 @@ class SessionOrchestrator:
                 cand = actor_by_words(cands, text)
                 if cand is not None:
                     note = f"target {it.target_ref!r} -> {cand.ref}: the player's words name them"
-            if needs_actor and forced is None:
+            # a whisper with nobody named goes to the companions present (see _speak), never a
+            # "which one" question listing everyone (play session 2, turns 16 and 47)
+            if (
+                needs_actor
+                and forced is None
+                and ACTION_MAP.get(kind)
+                in (
+                    "action.attack",
+                    "action.engage",
+                )
+            ):
                 actors = [c for c in cands if c.kind == "actor"]
                 pool = (
                     [c for c in actors if c.hostile]
@@ -1473,6 +1725,8 @@ class SessionOrchestrator:
         channel: str,
         cands: list[Candidate],
         turn: Turn,
+        *,
+        hint: str | None = None,
     ) -> IntentInterpreterOut:
         if not turn.can_make_sync_call():
             raise WorldError("turn call budget exhausted before intent parsing")
@@ -1483,6 +1737,11 @@ class SessionOrchestrator:
             if req.target_actor_ids
             else ""
         )
+        sit_lines = await self._situation_lines(req.actor_id)
+        if sit_lines:
+            situation += "\nSituation here: " + "; ".join(sit_lines)
+        if hint:
+            situation += "\n" + hint
         ctx = await self.compiler.compile(
             h,
             "intent_interpreter",
@@ -1493,7 +1752,11 @@ class SessionOrchestrator:
                 "candidates": self._candidates_text(cands),
                 **(
                     {"recent_turns": "Earlier in this scene (oldest first):\n- " + "\n- ".join(log)}
-                    if (log := await self._scene_log(req.actor_id, None, limit=4))
+                    if (
+                        log := await self._scene_log(
+                            req.actor_id, None, limit=4, include_narration=False
+                        )
+                    )
                     else {}
                 ),
             },
@@ -1529,6 +1792,50 @@ class SessionOrchestrator:
             )
         return res.output  # type: ignore[return-value]
 
+    async def _unless_stationary(
+        self,
+        h: CampaignHandle,
+        req: PlayRequest,
+        text: str,
+        channel: str,
+        cands: list[Candidate],
+        turn: Turn,
+        intent: IntentInterpreterOut,
+    ) -> IntentInterpreterOut:
+        """A move to the spot the character already stands on, when the words speak of going
+        somewhere ("We go into town"), gets one more interpretation pointed at travel (A9
+        outcomes eval: it was a no-op twice)."""
+        if not GOING_RE.search(text) or not any(c.kind == "location" for c in cands):
+            return intent
+        scene = await self.perspective.repo.current_scene(req.actor_id)
+        space = (scene.state.get("space") or {}) if scene else {}
+        here = (space.get("positions", {}).get(str(req.actor_id)) or {}).get("zone")
+        stuck = False
+        for it in intent.intents:
+            if ACTION_MAP.get(canonical_kind(it.action_type, channel)) not in (
+                "action.move",
+                "action.sprint",
+            ):
+                continue
+            cand = match_ref(cands, it.target_ref)
+            if cand is None or (cand.kind == "zone" and cand.id == here):
+                stuck = True
+        if not stuck or not turn.can_make_sync_call():
+            return intent
+        turn.notes.append("move to where the character stands: interpreted again as travel")
+        again = await self._interpret(
+            h,
+            req,
+            text,
+            channel,
+            cands,
+            turn,
+            hint=f"Note: the character already stands at {here or 'this spot'}; a move there "
+            "does nothing. Going into, out of or on to another place is travel, with target_ref "
+            "one of the places to travel to.",
+        )
+        return again if again.intents else intent
+
     async def _adjudicate(
         self, h: CampaignHandle, actor_id: uuid.UUID, description: str, turn: Turn
     ) -> RulesAdjudicatorOut | None:
@@ -1550,13 +1857,36 @@ class SessionOrchestrator:
             + ".\nDifficulties: "
             + ", ".join(f"{k}={v}" for k, v in rs.manifest.difficulty_scale.items())
         )
+        from app.domain.consequences import catalogue
+
+        scene = await self.perspective.repo.current_scene(actor_id)
+        sits: list[str] = []
+        if scene is not None:
+            now = await self.situations.now(scene.timeline_id)
+            rows = await self.situations.at_location(h.campaign_id, scene.location_id, now)
+            names = {
+                uuid.UUID(c.id): c.known_as for c in self._turn_cands if c.kind == "actor" and c.id
+            }
+            names[actor_id] = "the player character"
+            sits = await self.situations.lines(rows, names)
+        refs = candidates_text(self._turn_cands) if self._turn_cands else ""
+        situation = f"The player character attempts: {description}"
+        if refs:
+            situation += f"\n\n{refs}"
+        situation += (
+            "\n\nSituations here:\n- " + "\n- ".join(sits) if sits else "\n\nSituations here: none"
+        )
         ctx = await self.compiler.compile(
             h,
             "rules_adjudicator",
             actor_id=None,
             purpose="adjudicate",
-            situation=f"Actor {actor_id} attempts: {description}",
-            extra_sections={"rules_public": rules_public},
+            situation=situation,
+            extra_sections={
+                "rules_public": rules_public
+                + "\n\nConsequences (kind: what it does (params)):\n"
+                + catalogue()
+            },
         )
         res = await self.runner.run(h, ctx, turn_id=turn.turn_id)
         turn.record_call(
@@ -1584,6 +1914,25 @@ class SessionOrchestrator:
         """Schema/reference validation of a MechanicalProposal (rules-engine §30 steps 1–4)."""
         rs = self.engine.ruleset
         out = ruling.model_dump()
+        # GLM sometimes writes a consequence as an effect step ({"type": "reveal_feature", …};
+        # A9 outcomes eval): it is moved to its branch's consequences, never run as an effect
+        from app.domain.consequences import SPECS
+
+        cons = {k: list(v or []) for k, v in (out.get("consequences") or {}).items()}
+        for branch, key in (("on_success", "success"), ("on_failure", "failure")):
+            kept = []
+            for raw in out.get(branch) or []:
+                kind = str((raw or {}).get("type") or (raw or {}).get("kind") or "")
+                if kind in SPECS and kind not in REGISTRY:
+                    params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
+                    extra = {k: v for k, v in raw.items() if k not in ("type", "kind", "params")}
+                    item = {"kind": kind, **extra, **params}
+                    if item not in cons.setdefault(key, []):  # GLM often writes it in both
+                        cons[key].append(item)
+                else:
+                    kept.append(raw)
+            out[branch] = kept
+        out["consequences"] = cons
         if ruling.requires_check:
             chk = ruling.check or {}
             if chk.get("check", "check.core") not in rs.checks:
@@ -1658,6 +2007,38 @@ class SessionOrchestrator:
             elif action_key == "action.search":
                 loaded = await self.actions.load_scene(h, scene.id)
                 target = loaded.ctx.space.position(actor_key).zone
+            if action_key in ("action.move", "action.sprint"):
+                loaded = await self.actions.load_scene(h, scene.id)
+                here = loaded.ctx.space.position(actor_key).zone
+                if target is None or target == here:
+                    # nothing to do is not a failure (play session 2: "go in", "go back out"
+                    # became moves to the zone the party stood in, failed "already there",
+                    # and the narrator dressed that up as a refusal)
+                    from app.services.here import neighbours
+
+                    near = (
+                        {str(x) for x in await neighbours(self.session, scene.location_id)}
+                        if scene.location_id
+                        else set()
+                    )
+                    exits = [c for c in cands if c.kind == "location" and c.id in near]
+                    hint = (
+                        "You're already here. From here you can go to: "
+                        + ", ".join(c.known_as for c in exits)
+                        + "."
+                        if exits
+                        else "You're already here."
+                    )
+                    entry = {
+                        "action": action_key,
+                        "target": target,
+                        "status": "noop",
+                        "reason": "already there",
+                        "summary": hint,
+                    }
+                    result.actions.append(entry)
+                    result.mechanical_notices.append(f"(OOC) {hint}")
+                    return None
             try:
                 outcome = await self.actions.perform(
                     h,
@@ -1687,6 +2068,7 @@ class SessionOrchestrator:
             outcome = await self.actions.perform_improvised(
                 h, scene.id, actor_key, validated, description=text, turn_id=turn.turn_id
             )
+            await self._apply_consequences(h, req, scene, validated, outcome, step, turn, result)
         entry = {
             "action": outcome.request.action_key,
             "target": outcome.request.target,
@@ -1710,7 +2092,36 @@ class SessionOrchestrator:
 
         if text in self._ruling_cache:
             return RulesAdjudicatorOut.model_validate(self._ruling_cache[text])
-        ruling = await self._adjudicate(h, actor_id, text, turn)
+        forced = getattr(self, "_forced_skill", None)
+        ask = text
+        if forced:
+            name = self.engine.ruleset.skills[forced].name
+            ask = (
+                f"{text} (The player calls for a {name} check: a check is required, "
+                f"skill {forced}.)"
+            )
+        ruling = await self._adjudicate(h, actor_id, ask, turn)
+        if forced:
+            # the called-for check always happens, with the player's skill, whatever the ruling
+            # said (and even without one): a check the player asks for is never a dead end
+            sdef = self.engine.ruleset.skills[forced]
+            base = ruling.model_dump() if ruling is not None else {"requires_check": True}
+            chk = dict(base.get("check") or {})
+            attr = chk.get("attribute")
+            chk.update(
+                {
+                    "check": chk.get("check") or "check.core",
+                    "skill": forced,
+                    "attribute": attr
+                    if attr and self.engine.ruleset.has(attr)
+                    else sdef.default_attribute,
+                    "difficulty": chk.get("difficulty") or "moderate",
+                }
+            )
+            base.update({"requires_check": True, "check": chk})
+            if not base.get("summary"):
+                base["summary"] = f"{sdef.name}: {text[:120]}"
+            ruling = RulesAdjudicatorOut.model_validate(base)
         if ruling is not None:
             self._ruling_cache[text] = ruling.model_dump()
         return ruling
@@ -1739,8 +2150,9 @@ class SessionOrchestrator:
                     continue
                 seen.add(key)
                 skill, attribute, label = SOCIAL_SKILLS[kind]
-                difficulty: Any = "moderate"
-                stakes = SOCIAL_STAKES[kind]
+                sr = await self._social_ruling(h, req, kind, step, text, turn)
+                difficulty: Any = (sr.check or {}).get("difficulty") or "moderate"
+                stakes = {**SOCIAL_STAKES[kind], **{k: v for k, v in sr.stakes.items() if v}}
             elif (
                 kind not in SPEECH_TYPES
                 and kind not in FREE_TYPES
@@ -1806,30 +2218,18 @@ class SessionOrchestrator:
         against a moderate difficulty. The listener learns how convincing it was and decides
         what to do about it in character."""
         skill, attribute, label = SOCIAL_SKILLS[kind]
-        ruling = {
-            "requires_check": True,
-            "check": {
-                "check": "check.core",
-                "skill": skill,
-                "attribute": attribute,
-                "difficulty": "moderate",
-                "purpose": label,
-            },
-            "on_success": [],
-            "on_failure": [],
-            "time_cost_seconds": 6,
-            "summary": f"{label}: {text[:120]}",
-        }
         try:
-            from app.ai.roles import RulesAdjudicatorOut
-
-            validated = self.validate_ruling(RulesAdjudicatorOut.model_validate(ruling))
+            ruling = await self._social_ruling(h, req, kind, step, text, turn)
+            validated = self.validate_ruling(ruling)
             outcome = await self.actions.perform_improvised(
                 h, scene.id, str(req.actor_id), validated, description=text, turn_id=turn.turn_id
             )
         except Exception as exc:  # noqa: BLE001 - the words were still spoken
             result.dev_notes.append(f"social check not resolved: {type(exc).__name__}: {exc}")
             return
+        await self._apply_consequences(
+            h, req, scene, validated, outcome, step, turn, result, social_kind=kind
+        )
         target = step["candidate"]
         entry = {
             "action": f"social.{kind}",
@@ -1846,6 +2246,206 @@ class SessionOrchestrator:
             if check is not None:
                 margin = int(check.detail.get("total", 0)) - int(check.detail.get("target", 0))
             hap.social[uuid.UUID(target.id)] = (label, outcome.status == "succeeded", margin)
+
+    async def _trade(
+        self,
+        h: CampaignHandle,
+        req: PlayRequest,
+        scene: Scene,
+        kind: str,
+        step: dict[str, Any],
+        text: str,
+        turn: Turn,
+        result: PlayResult,
+        hap: Happenings,
+    ) -> None:
+        """Buy or sell at the ruleset's prices (DECISIONS 10d, Phase 3). The other side is the
+        person named, or the one other person present outside the party."""
+        from app.services.consequences import ConsequenceContext
+        from app.services.trade import TradeService
+
+        cand = step.get("candidate")
+        party = await self._party_ids(req.actor_id)
+        if cand is None or cand.kind != "actor":
+            cand = actor_by_words(self._turn_cands, text)
+        if cand is None or cand.kind != "actor":
+            others = [
+                c
+                for c in self._turn_cands
+                if c.kind == "actor" and c.id and uuid.UUID(c.id) not in party
+            ]
+            cand = others[0] if len(others) == 1 else None
+        entry: dict[str, Any] = {"action": f"trade.{kind}", "target": None}
+        if cand is None:
+            entry |= {"status": "invalid", "reason": "it isn't clear who you are trading with"}
+            result.actions.append(entry)
+            result.mechanical_notices.append("(OOC) Name who you are buying from or selling to.")
+            return
+        entry["target"] = cand.known_as
+        fresh = await self.session.get(Scene, scene.id)
+        c = ConsequenceContext(
+            h, fresh or scene, req.actor_id, None, self._turn_cands, "engine", None, turn.turn_id
+        )
+        trade = TradeService(self.session, self.engine, self.consequences)
+        seller = uuid.UUID(cand.id)
+        done, why = await (
+            trade.buy(c, seller, text) if kind == "buy" else trade.sell(c, seller, text)
+        )
+        if why:
+            entry |= {"status": "invalid", "reason": why}
+            result.mechanical_notices.append(f"(OOC) {why[0].upper()}{why[1:]}.")
+        else:
+            entry |= {"status": "succeeded", "summary": " ".join(done)}
+            for line in done:
+                result.consequences.append(
+                    {"kind": kind, "ok": True, "text": line, "reason": "", "source": "engine"}
+                )
+        result.actions.append(entry)
+        hap.addressed.add(seller)
+
+    async def _conversation_partner(
+        self, actor_id: uuid.UUID, scene: Scene, cands: list[Candidate], text: str
+    ) -> Candidate | None:
+        """The person the player means: named in the words, else the last one outside the
+        party who spoke with them in this scene and is still here."""
+        named = actor_by_words(cands, text)
+        party = await self._party_ids(actor_id)
+        if named is not None and named.id and uuid.UUID(named.id) not in party:
+            return named
+        from app.services.scene_log import scene_turns
+
+        here = {c.id: c for c in cands if c.kind == "actor" and c.id}
+        for t in reversed(await scene_turns(self.session, actor_id, scene, limit=6)):
+            for sp in reversed((t.result or {}).get("speakers", []) or []):
+                aid = str(sp.get("actor_id"))
+                if aid in here and uuid.UUID(aid) not in party and aid != str(actor_id):
+                    return here[aid]
+        return None
+
+    async def _social_ruling(
+        self,
+        h: CampaignHandle,
+        req: PlayRequest,
+        kind: str,
+        step: dict[str, Any],
+        text: str,
+        turn: Turn,
+    ) -> RulesAdjudicatorOut:
+        """One ruling for a social attempt (DECISIONS 10d): the difficulty from the situation and
+        what changes on each branch. The skill is always the social skill. Cached for the turn
+        (and the paused roll); without a ruling, a moderate check with no stated consequences
+        (the engine's safety net still applies)."""
+        from app.ai.roles import RulesAdjudicatorOut
+
+        skill, attribute, label = SOCIAL_SKILLS[kind]
+        cand = step.get("candidate")
+        key = f"social:{kind}:{cand.id if cand is not None else ''}:{text}"
+        if key in self._ruling_cache:
+            return RulesAdjudicatorOut.model_validate(self._ruling_cache[key])
+        who = cand.known_as if cand is not None else "someone present"
+        ruling = await self._adjudicate(
+            h,
+            req.actor_id,
+            f"a {label} attempt aimed at {who}: {text!r}. The check is {label} "
+            f"({skill} with {attribute}); rule the difficulty from the circumstances, the stakes "
+            "and the consequences of each branch.",
+            turn,
+        )
+        base = ruling.model_dump() if ruling is not None else {}
+        chk = dict(base.get("check") or {})
+        d = chk.get("difficulty")
+        if d not in self.engine.ruleset.manifest.difficulty_scale:
+            d = "moderate"
+        base.update(
+            {
+                "requires_check": True,
+                "check": {
+                    "check": "check.core",
+                    "skill": skill,
+                    "attribute": attribute,
+                    "difficulty": d,
+                    "purpose": label,
+                },
+                "on_success": base.get("on_success") or [],
+                "on_failure": base.get("on_failure") or [],
+                "time_cost_seconds": 6,
+                "summary": base.get("summary") or f"{label}: {text[:120]}",
+            }
+        )
+        out = RulesAdjudicatorOut.model_validate(base)
+        self._ruling_cache[key] = out.model_dump()
+        return out
+
+    async def _apply_consequences(
+        self,
+        h: CampaignHandle,
+        req: PlayRequest,
+        scene: Scene,
+        ruling: dict[str, Any],
+        outcome: ActionOutcome | None,
+        step: dict[str, Any] | None,
+        turn: Turn,
+        result: PlayResult,
+        *,
+        social_kind: str | None = None,
+    ) -> None:
+        """What the ruled branch changes in the world, then the engine's safety net (no
+        soft-blocks). Rejected proposals go to dev notes with their reason."""
+        from app.services.consequences import ConsequenceContext
+
+        if outcome is None or outcome.status not in ("succeeded", "failed"):
+            return
+        branch = "success" if outcome.status == "succeeded" else "failure"
+        items = list(((ruling or {}).get("consequences") or {}).get(branch) or [])
+        fresh = await self.session.get(Scene, scene.id)
+        c = ConsequenceContext(
+            h,
+            fresh or scene,
+            req.actor_id,
+            None,
+            self._turn_cands,
+            "ruling",
+            branch,
+            turn.turn_id,
+        )
+        applied = await self.consequences.apply_all(c, items)
+        cand = (step or {}).get("candidate")
+        target = (
+            uuid.UUID(cand.id) if cand is not None and cand.kind == "actor" and cand.id else None
+        )
+        net = await self.consequences.safety_net(
+            c,
+            succeeded=branch == "success",
+            target_actor=target,
+            addresses=(ruling or {}).get("addresses"),
+            applied=applied,
+            social_kind=social_kind,
+            text=str(getattr(outcome.request, "params", {}).get("description", "")),
+        )
+        if net:
+            turn.notes.append(f"consequence safety net: {[a.kind for a in net]}")
+        self._record_consequences([*applied, *net], result, source="ruling")
+        # whoever a consequence is about answers this turn (they agreed, refused, warmed…)
+        hap = getattr(self, "_turn_hap", None)
+        if hap is not None:
+            for a in [*applied, *net]:
+                if not a.ok:
+                    continue
+                party = await self._party_ids(req.actor_id)
+                for aid in a.people:
+                    if aid != req.actor_id and aid not in party:
+                        hap.addressed.add(aid)
+                        if social_kind and aid not in hap.social and branch == "success":
+                            label = SOCIAL_SKILLS[social_kind][2]
+                            hap.social[aid] = (label, True, 0)
+
+    def _record_consequences(self, applied: list[Any], result: PlayResult, *, source: str) -> None:
+        for a in applied:
+            if a.ok:
+                if a.text:
+                    result.consequences.append({**a.to_dict(), "source": source})
+            else:
+                result.dev_notes.append(f"consequence {a.kind} rejected ({source}): {a.reason}")
 
     async def _read(
         self,
@@ -1897,24 +2497,46 @@ class SessionOrchestrator:
     async def _companions_in_words(
         self, actor_id: uuid.UUID, cands: list[Candidate], text: str
     ) -> list[uuid.UUID]:
-        """Who the player's own words take along (A9 slice: "We head to the Red Lantern, all
-        three of us" moved only Alex). Party members named in the text come; "we", "us",
-        "together" or "all of us" with nobody named brings every party member present. Only
-        party members ever follow (the caller filters)."""
+        """Who comes along (DECISIONS 10d: the party travels together by default). Everyone
+        present comes (the caller keeps party members and followers), unless the player's words
+        leave someone behind: "alone" / "by myself" / "on my own" takes nobody; "without
+        Tomas", "Tomas stays", "leave Elara" drops the person named; "with Elara" (and no "we")
+        takes only those named."""
         low = text.lower()
+        words = set(re.findall(r"[a-z0-9]+", low))
         present = [c for c in cands if c.kind == "actor" and c.id and c.id != str(actor_id)]
-        named = [
-            uuid.UUID(c.id)
-            for c in present
-            if _tokens(c.known_as) and _tokens(c.known_as) <= set(re.findall(r"[a-z0-9]+", low))
-        ]
-        group = re.search(r"\b(we|us|together|all of us|all (two|three|four|five) of us)\b", low)
-        with_me = re.search(r"\b(and i|with me|come with|follow me)\b", low)
-        if named and (group or with_me):
-            return named
-        if group:
-            return [uuid.UUID(c.id) for c in present]
-        return []
+        if re.search(
+            r"\b(alone|by myself|on my own|just me|only me|without (them|the others))\b", low
+        ):
+            return []
+
+        def named_in(fragment: str) -> list[Candidate]:
+            fw = set(re.findall(r"[a-z0-9]+", fragment))
+            return [c for c in present if _tokens(c.known_as) and _tokens(c.known_as) <= fw]
+
+        left: set[str] = set()
+        for m in re.finditer(r"\bwithout ([a-z ,'-]+?)(?:[.!?;]|\band\b|$)", low):
+            left |= {c.id for c in named_in(m.group(1))}
+        for c in present:
+            toks = _tokens(c.known_as)
+            if toks and toks <= words:
+                first = sorted(toks)[0]
+                if re.search(
+                    rf"\b(leave|leaving) [a-z ]*{first}\b|\b{first}[a-z ]* (stays|remains|waits)\b",
+                    low,
+                ):
+                    left.add(c.id)
+        group = re.search(r"\b(we|us|together|all of us|party|everyone)\b", low)
+        named = [c for c in present if _tokens(c.known_as) and _tokens(c.known_as) <= words]
+        if named and not group and re.search(r"\b(and i|me and|and me)\b", low):
+            # "Elara and I go to the warehouse": just the two of them
+            return [uuid.UUID(c.id) for c in named if c.id not in left]
+        with_only = re.search(r"\b(with|take|bring) ([a-z ,'-]+)", low)
+        if with_only and not group:
+            chosen = named_in(with_only.group(2))
+            if chosen:
+                return [uuid.UUID(c.id) for c in chosen if c.id not in left]
+        return [uuid.UUID(c.id) for c in present if c.id not in left]
 
     async def _travel(
         self,
@@ -1946,9 +2568,38 @@ class SessionOrchestrator:
                 companions.append(uuid.UUID(c.id))
         companions += await self._companions_in_words(req.actor_id, cands, step.get("text", ""))
         party = await self._party_ids(req.actor_id)
-        companions = list(dict.fromkeys(a for a in companions if a != req.actor_id and a in party))
+        # people accompanying the party (the accompany consequence) come along too
+        followers = {
+            s.subject_actor_id
+            for s in await self.situations.visible_to(req.actor_id)
+            if s.kind == "follower" and s.subject_actor_id is not None
+        }
+        companions = list(
+            dict.fromkeys(
+                a for a in companions if a != req.actor_id and (a in party or a in followers)
+            )
+        )
         if companions:
             turn.notes.append(f"travelling with {len(companions)} companion(s)")
+        # a recorded obstacle stops the way (DECISIONS 10d); prose never does
+        block = await self.situations.blocking(req.actor_id, scene.location_id, uuid.UUID(cand.id))
+        if block is not None:
+            async with EventTransaction(self.session, h.campaign_id, h.timeline_id) as tx:
+                await self.situations.change(tx, block.situation, {"attempts": block.attempts + 1})
+            holder = ""
+            if block.situation.holder_actor_id is not None:
+                hc = next((c for c in cands if c.id == str(block.situation.holder_actor_id)), None)
+                holder = f" ({hc.known_as} won't let you)" if hc else ""
+            reason = f"the way to {cand.known_as} is blocked: {block.label}{holder}"
+            result.actions.append(
+                {"action": "travel", "target": cand.id, "status": "blocked", "reason": reason}
+            )
+            result.mechanical_notices.append(
+                f"(OOC) {reason[0].upper()}{reason[1:]}. Ways past: "
+                + "; ".join(block.ways_past)
+                + "."
+            )
+            return None
         try:
             tr = await self.scenes.travel(
                 h,
@@ -2082,24 +2733,43 @@ class SessionOrchestrator:
         # quoted words first; then the interpreter's line for described speech; the whole text
         # only on an explicit say/whisper (A9 replay: "I'd like to subtly motion for Elara…"
         # was spoken aloud)
-        spoken = (
-            quoted[1]
-            if quoted
-            else (intent.utterance or "").strip()
-            or (text if channel in ("say", "whisper") else text)
-        )
+        spoken = quoted[1] if quoted else (intent.utterance or "").strip() or described_speech(text)
         targets = list(req.target_actor_ids)
         if step is not None and step["candidate"] is not None and step["candidate"].kind == "actor":
             targets = targets or [uuid.UUID(step["candidate"].id)]
         elif not targets and intent.targets:
             named = [match_ref(cands, t) or actor_by_words(cands, t) for t in intent.targets]
             targets = [uuid.UUID(c.id) for c in named if c is not None and c.kind == "actor"]
+        explicit = getattr(self, "_channel_in", channel) in ("say", "whisper")
+        if (
+            not quoted
+            and not (intent.utterance or "").strip()
+            and not explicit
+            and spoken == text
+            and NARRATION_RE.match(text)
+        ):
+            # no words were given, only what the character does ("We approach the merchant
+            # and introduce ourselves"): an action toward someone, never spoken aloud as if
+            # it were dialogue (play session 3)
+            return await self._gesture(h, req, scene, text, targets, cands, result, hap)
         ch = (
             "whisper"
             if channel == "whisper"
             or (step is not None and step["intent"].action_type.lower() == "whisper")
             else "say"
         )
+        if ch == "whisper" and not targets:
+            # a whisper with nobody picked goes to the companions at your side (play session
+            # 2: it asked "which actor" listing everyone present)
+            party = await self._party_ids(req.actor_id)
+            targets = [
+                uuid.UUID(c.id)
+                for c in cands
+                if c.kind == "actor"
+                and c.id
+                and uuid.UUID(c.id) in party
+                and c.id != str(req.actor_id)
+            ]
         if ch == "whisper" and not targets:
             raise WorldError("whisper needs a target")
         conveys = [
@@ -2146,6 +2816,77 @@ class SessionOrchestrator:
             {"speech": {"channel": ch, "recipients": len(r.recipients), "claims": len(r.claims)}},
         )
         return True
+
+    async def _gesture(
+        self,
+        h: CampaignHandle,
+        req: PlayRequest,
+        scene: Scene,
+        text: str,
+        targets: list[uuid.UUID],
+        cands: list[Candidate],
+        result: PlayResult,
+        hap: Happenings | None,
+    ) -> bool:
+        """What the character does toward someone without quoted words. The person it is
+        aimed at reacts to the deed; introducing yourselves teaches them your names."""
+        who = list(targets)
+        if not who:
+            partner = await self._conversation_partner(req.actor_id, scene, cands, text)
+            if partner is not None and partner.id:
+                who = [uuid.UUID(partner.id)]
+        names = {uuid.UUID(c.id): c.known_as for c in cands if c.kind == "actor" and c.id}
+        if hap is not None:
+            for t in who:
+                hap.gestures[t] = f'did this: "{text.strip()[:240]}"'
+                hap.addressed.add(t)
+        introduced = []
+        if who and INTRODUCE_RE.search(text):
+            introduced = await self._introduce_party(h, req, who)
+        entry = {
+            "action": "gesture",
+            "target": ", ".join(names.get(t, "someone") for t in who) or None,
+            "status": "succeeded",
+            "reason": "",
+            "summary": text.strip()[:200],
+        }
+        result.actions.append(entry)
+        if introduced:
+            result.consequences.append(
+                {
+                    "kind": "introduce",
+                    "ok": True,
+                    "text": f"{', '.join(names.get(t, 'They') for t in who)} now know"
+                    + f" {'your names' if len(introduced) > 1 else 'your name'}.",
+                    "reason": "",
+                    "source": "engine",
+                }
+            )
+        return True
+
+    async def _introduce_party(
+        self, h: CampaignHandle, req: PlayRequest, listeners: list[uuid.UUID]
+    ) -> list[uuid.UUID]:
+        """The player's party present tell their names to the listeners."""
+        from app.persistence.models import Actor, Entity
+        from app.services.knowledge import KnowledgeService
+
+        here = await self.perspective.repo.current_scene(req.actor_id)
+        party = [req.actor_id]
+        for aid in await self._party_ids(req.actor_id):
+            a = await self.session.get(Actor, aid)
+            if aid != req.actor_id and a is not None and here and a.current_scene_id == here.id:
+                party.append(aid)
+        ks = KnowledgeService(self.session)
+        async with EventTransaction(self.session, h.campaign_id, h.timeline_id) as tx:
+            for member in party:
+                a = await self.session.get(Actor, member)
+                ent = await self.session.get(Entity, a.entity_id) if a else None
+                if ent is None or not ent.canonical_name:
+                    continue
+                for listener in listeners:
+                    await ks.learn_identity(h, listener, ent.id, ent.canonical_name, tx=tx)
+        return party
 
     def _ref_to_id(self, ref: str | None) -> str | None:
         if not ref:
@@ -2296,7 +3037,12 @@ class SessionOrchestrator:
             .all()
         )
         names = await self.perspective.known_entities(actor_id)
-        return [PerspectiveService.render(o.observation_type, o.raw, names) for o in rows]
+        # heard claims are paraphrases of lines the player already sees verbatim: dev only
+        return [
+            ("(claim) " if o.observation_type == "heard_claim" else "")
+            + PerspectiveService.render(o.observation_type, o.raw, names)
+            for o in rows
+        ]
 
     async def _resources(self, actor_id: uuid.UUID) -> dict[str, int]:
         actor = await self.perspective.repo.actor(actor_id)
@@ -2331,6 +3077,105 @@ class SessionOrchestrator:
             "world_version": campaign.world_version if campaign else None,
             "scene_version": fresh.version if fresh else None,
         }
+
+
+# "We approach the merchant…", "I stay close…": the player narrating a deed, not words
+NARRATION_RE = re.compile(
+    r"^\s*(?:i|we|the party|my party)\s+(?!(?:am|are|can|could|would|will|should|need|"
+    r"want|have|think|know|believe|hope|wonder|mean|just|really|say|says|tell|ask|whisper|"
+    r"shout|call|reply|answer|mutter|explain|warn|inform|remind|promise|suggest)\b)[a-z]+\b",
+    re.I,
+)
+INTRODUCE_RE = re.compile(r"\b(introduce|introduces|introducing|give (?:our|my) names?)\b", re.I)
+GOING_RE = re.compile(
+    r"\b(into|enter|entering|inside|through|go in|head in|go back|back out|leave|leaving|"
+    r"follow|go on|head on|head to|go to|on to|onward)\b",
+    re.I,
+)
+QUOTE_SPAN_RE = re.compile(r'["“]([^"”]{12,})["”]')
+
+
+def _drop_quotes(narration: str, drop) -> tuple[str, list[str]]:
+    """Remove each sentence holding a quote for which `drop(quote, sentence)` is true. Quotes
+    are found in the whole text first, so a quoted line with full stops of its own ("Just my
+    luck. First the inspections…") is still one quote (A9 outcomes eval)."""
+    spans: list[tuple[int, int]] = []
+    for m in QUOTE_SPAN_RE.finditer(narration):
+        start = max(narration.rfind(c, 0, m.start()) for c in ".!?…") + 1
+        if m.group(1).rstrip()[-1:] in ".!?…":
+            end = m.end()  # the quote ends its own sentence
+        else:  # '"…," he mutters.' — the sentence goes on after the quote
+            tail = re.search(r"[.!?…][\"”']?(\s|$)", narration[m.end() :])
+            end = m.end() + (tail.end() if tail and tail.start() <= 80 else 0)
+        if drop(m.group(1).strip().lower(), narration[start:end].lower()):
+            spans.append((start, end))
+    if not spans:
+        return narration, []
+    removed, out, pos = [], [], 0
+    for s0, e0 in sorted(spans):
+        if s0 < pos:
+            s0 = pos
+        out.append(narration[pos:s0])
+        removed.append(narration[s0:e0].strip())
+        pos = max(pos, e0)
+    out.append(narration[pos:])
+    text = re.sub(r"\s{2,}", " ", "".join(out)).strip()
+    return (text or narration), removed
+
+
+def drop_repeated_quotes(
+    narration: str, dialogue: list[str], earlier: list[str]
+) -> tuple[str, list[str]]:
+    """Remove each sentence that quotes a line someone said in an earlier turn and nobody said
+    this turn."""
+    now = " ".join(dialogue).lower()
+    old = [e.strip().lower() for e in earlier if e and e.strip()]
+    return _drop_quotes(
+        narration,
+        lambda q, _s: q[:40] not in now and any(q[:40] in e or e[:40] in q for e in old),
+    )
+
+
+NAME_STOP = {"the", "a", "an", "of", "you", "your", "man", "woman", "who", "with"}
+
+
+def drop_unspoken_quotes(
+    narration: str, dialogue: list[str], living: list[str]
+) -> tuple[str, list[str]]:
+    """Remove each sentence that puts words in the mouth of a living character (one played by
+    a model or a human) that they did not say this turn (DECISIONS 10e; play session 3: the
+    narrator had the merchant accept the escort in his own words). Unnamed bystanders may
+    still get a line."""
+    now = " ".join(dialogue).lower()
+    marks = [
+        {t for t in re.findall(r"[a-z']+", n.lower()) if len(t) > 2 and t not in NAME_STOP}
+        for n in living
+    ]
+
+    def attributed(sentence: str) -> bool:
+        words = set(re.findall(r"[a-z']+", sentence))
+        return any(m and m & words for m in marks)
+
+    return _drop_quotes(narration, lambda q, sent: q[:40] not in now and attributed(sent))
+
+
+DESCRIBED_SPEECH_RE = re.compile(
+    r"^\s*(?:I|we)\s+(?:\w+ly\s+)?(?:tell|warn|inform|remind|explain to|say to|promise|"
+    r"whisper|say|ask|shout|mutter|suggest)\b.*?\b"
+    r"(?:that)\s+(.+)$",
+    re.I | re.S,
+)
+
+
+def described_speech(text: str) -> str:
+    """The line itself when the player describes speech and the interpreter gave no utterance
+    (A9 outcomes eval: "I tell the older guard firmly that his captain will hear about this…"
+    was spoken whole)."""
+    m = DESCRIBED_SPEECH_RE.match(text)
+    if not m:
+        return text
+    line = m.group(1).strip()
+    return line[:1].upper() + line[1:]
 
 
 def _looks_like_uuid(v: str) -> bool:

@@ -17,6 +17,12 @@ resources:
     recovery:
       short_rest: "floor(resource.stamina.max / 2)"
       long_rest: "resource.stamina.max"
+  - key: resource.coin
+    name: Coin
+    max_formula: "1000000"
+    initial_formula: "10 + attr.presence * 5"
+    tracked_as: count
+    visibility: owner
   - key: resource.resolve_points
     name: Resolve Points
     max_formula: "3 + attr.resolve"

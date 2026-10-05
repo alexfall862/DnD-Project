@@ -79,7 +79,22 @@ once per session; then, for each milestone, read only the `## Read` context pack
   - OOC goes to the `table_assistant` role.
   The A9 evals:
   `tests/eval/test_frostbridge_a9.py` (slice + World Simulator), `test_worldgen_a9.py`,
-  `test_session_replay_a9.py` (the 2026-10-05 browser session).
+  `test_session_replay_a9.py` (the 2026-10-05 browser session), `test_outcomes_a9.py` (10d).
+- 10d, "Outcomes change the world" (`docs/DECISIONS.md`):
+  - Situations (`situations` table, migration 0018; `app/services/situations.py`) are
+    objective obstacles, statuses, promises, clocks, alarms, prices, debts and followers.
+  - The closed consequence vocabulary is `app/domain/consequences.py` (34 kinds), applied with
+    events by `app/services/consequences.py`.
+    - Rulings carry `consequences: {success, failure}` and `addresses`; social attempts get
+      one ruling.
+    - NPCs and AI players may propose only consequences about themselves.
+    - The engine's safety net prevents soft-blocks.
+  - Travel is stopped only by a recorded obstacle. The party travels together by default.
+  - Coin is `resource.coin`, prices are `rulesets/core_adventure/goods.yaml`, and trading is
+    `app/services/trade.py`.
+  - Check mode is `check_skill` on /play. Table-assistant `TRY:` lines become `suggestions`.
+    `GET /characters/{id}/here` serves the Here strip.
+  - The GM director is still deferred.
 - Milestone 08 landed `SimulationService` (one bounded run per crossed 6-hour boundary or
   wait/rest: scheduled events → plan clocks → candidates → at most one World Simulator call →
   `simulation.run` event), the `background_jobs` worker (`app/worker.py`), and NPC whispers.

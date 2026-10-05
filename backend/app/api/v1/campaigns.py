@@ -92,6 +92,7 @@ class ResourceOut(BaseModel):
     name: str
     current: int
     max: int
+    tracked_as: str = "pool"
 
 
 class ConditionOut(BaseModel):
@@ -230,6 +231,48 @@ async def sheet(
     except UnauthorizedPerspective as exc:
         raise UnauthorizedPerspectiveError(str(exc)) from exc
     return SheetOut.model_validate(sh, from_attributes=True)
+
+
+class HereZoneOut(BaseModel):
+    key: str
+    name: str
+    features: list[str]
+    people: list[str]
+    you_are_here: bool
+    adjacent: bool
+
+
+class HereExitOut(BaseModel):
+    location_id: uuid.UUID
+    known_as: str
+    travel_minutes: int
+    blocked_by: str | None = None
+
+
+class HereOut(BaseModel):
+    actor_id: uuid.UUID
+    location: str
+    scene_type: str
+    zone: str | None
+    zones: list[HereZoneOut]
+    exits: list[HereExitOut]
+    situations: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@router.get("/characters/{actor_id}/here", response_model=HereOut)
+async def here(actor_id: uuid.UUID, session: AsyncSession = Depends(get_session)) -> HereOut:
+    """Where the focus character is, as they perceive it: the place, its spots and who is in
+    each, the ways out (and whether something blocks them), and the situations they can see
+    (play session 2: "a report of where we are within the scene")."""
+    from app.services.here import HereService
+
+    try:
+        v = await HereService(session).view(actor_id)
+    except UnauthorizedPerspective as exc:
+        raise UnauthorizedPerspectiveError(str(exc)) from exc
+    if v is None:
+        raise NotFound("not in a scene")
+    return HereOut.model_validate(v, from_attributes=True)
 
 
 class FeedInput(BaseModel):

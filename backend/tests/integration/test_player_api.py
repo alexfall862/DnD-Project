@@ -51,6 +51,27 @@ async def test_the_sheet_is_the_focus_actors_own(client) -> None:
         assert r.json()["error"]["code"] == "UNAUTHORIZED_PERSPECTIVE"
 
 
+async def test_here_reports_the_place_its_spots_people_and_ways_out(client) -> None:
+    """Play session 2: "a report of where we are within the scene"."""
+    w = await seed(client)
+    alex = w["actors"]["Alex"]
+    r = await client.get(f"{API}/characters/{alex}/here")
+    assert r.status_code == 200, r.text
+    here = r.json()
+    assert here["location"] == "Town Gate"
+    assert sum(z["you_are_here"] for z in here["zones"]) == 1
+    people = [p for z in here["zones"] for p in z["people"]]
+    assert "Elara" in people and "Tomas" in people
+    exits = {e["known_as"]: e for e in here["exits"]}
+    assert exits and all(e["travel_minutes"] >= 1 for e in exits.values())
+    assert all(e["blocked_by"] is None for e in exits.values())  # the gate was never closed
+    sheet = (await client.get(f"{API}/characters/{alex}/sheet")).json()
+    coin = next(x for x in sheet["resources"] if x["key"] == "resource.coin")
+    assert coin["tracked_as"] == "count" and coin["current"] > 0
+    r = await client.get(f"{API}/characters/{w['actors']['Mira']}/here")
+    assert r.status_code == 403
+
+
 async def test_the_party_is_what_the_focus_actor_perceives(client, session_factory) -> None:
     w = await seed(client)
     cid, alex = w["campaign_id"], w["actors"]["Alex"]

@@ -13,6 +13,7 @@ files:
   - conditions.yaml
   - traits.yaml
   - equipment.yaml
+  - goods.yaml
   - actions.yaml
 
 # §2 difficulty scale

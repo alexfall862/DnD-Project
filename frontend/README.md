@@ -36,15 +36,25 @@ Everything outside dev view comes from normal, perspective-safe endpoints:
   - Whisper takes one or several listeners, or the whole party in one tap.
   - Say can name who it is for: everyone present hears, and they answer first.
   - Clarification questions appear inline with their candidates.
+  - A whisper with nobody picked goes to the companions at your side.
+  - **Check** mode: pick a skill, say what you attempt, and optionally pick who it is aimed at.
+    The game always calls for that check.
+  - An unsent draft survives switching views.
+- The **Here** strip names the place and your spot. Opened, it shows each spot and who is in
+  it, the ways out with travel time (and what blocks one), and what is going on: obstacles,
+  statuses and promises.
+- **What changed** lines (→) list what a turn did to the world: a way opened, someone agreed,
+  coin paid, a status set.
 - **Dice.** When the game calls for a check, the turn pauses on a card showing the skill, the
   number to reach, your bonus, and what success, failure and a retry would mean. You pick a
   die style, click Roll and watch it land, or Reconsider. Settings can switch to Auto-roll.
   The engine rolls the dice either way, never the storyteller.
-- **OOC** asks the table: rules, or what your character knows or sees, answered from your
-  character's perspective. Nothing happens in the world.
+- **OOC** asks the table: rules, prices, or what your character knows or sees, answered from
+  your character's perspective. Nothing happens in the world. It remembers its last answers,
+  and its suggestions appear as **Try:** chips that put the action in the composer.
 - While a turn runs, a status line shows what it is doing and for how long, whatever view you
   are on.
-- Character shows the sheet and inventory. Party shows who is with you; someone elsewhere is only "away".
+- Character shows the sheet (with coin) and inventory. Party shows who is with you; someone elsewhere is only "away".
 - Journal, Encyclopedia ("what you know or suspect") and World (scene and beliefs) are per-character.
 - Settings holds the theme (this device) and narration style, companion reactions and spectator mode (the campaign).
 

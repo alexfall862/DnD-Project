@@ -119,6 +119,17 @@ class PerspectiveService:
         if scene.location_id is not None:
             loc_entity_id = await self._location_entity(scene.location_id)
             location_name = names.get(loc_entity_id) if loc_entity_id else None
+            if location_name is None and loc_entity_id is not None:
+                # a place whose name you have not learned reads by what it looks like
+                from app.persistence.models import Entity, Location
+
+                ent = await self.repo.s.get(Entity, loc_entity_id)
+                loc = await self.repo.s.get(Location, scene.location_id)
+                descriptor = (ent.metadata_ or {}).get("descriptor") if ent else None
+                kind = (loc.location_type or "").replace("_", " ") if loc else ""
+                location_name = descriptor or (
+                    f"an unnamed {kind}" if kind and kind != "other" else None
+                )
         clock_tick = scene.local_tick
         return SceneView(
             scene.id,
@@ -201,10 +212,13 @@ class PerspectiveService:
                 "asserts_false": "denies that",
                 "hypothetical": "wonders if",
             }.get(stance, "says")
-            subj = p.get("subject_entity_id") or ""
-            obj = p.get("object_entity_id") or ""
-            val = p.get("value") or ""
             who = raw.get("speaker", "someone").capitalize()
+            subj = p.get("subject_entity_id") or ""
+            if str(subj).lower() == "self":
+                subj = "they"  # the speaker about themselves ("says self insists…", session 2)
+            obj = p.get("object_entity_id") or ""
+            val = p.get("value")
+            val = "" if val is None or isinstance(val, bool) else str(val)
             return (
                 f"{who} {verb} {subj} {p.get('predicate')} {obj} {val}".replace("  ", " ").strip()
                 + "."

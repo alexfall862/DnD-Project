@@ -611,6 +611,9 @@ class ActorPromoted(EventPayload):
     goals: int = 0
     memories: int = 0
     model_run_id: uuid.UUID | None = None
+    # the name they were given, when they had only a description (known to nobody yet)
+    name: str | None = None
+    previous_name: str | None = None
 
 
 class SettingsChanged(EventPayload):
@@ -642,6 +645,52 @@ class MechanicalDefinitionCreated(EventPayload):
     definition_key: str
     definition_type: str
     source_kind: str
+
+
+class SituationOpened(EventPayload):
+    """A recorded circumstance began (DECISIONS 10d): an obstacle, status, promise, clock,
+    alarm, price, debt or follower."""
+
+    event_type: ClassVar[str] = "situation.opened"
+    situation_id: uuid.UUID
+    kind: str
+    label: str
+    location_id: uuid.UUID | None = None
+    subject_actor_id: uuid.UUID | None = None
+    holder_actor_id: uuid.UUID | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+    visibility: str = "public"
+    expires_tick: int | None = None
+
+
+class SituationChanged(EventPayload):
+    """A situation's data changed (passage granted to someone, a clock advanced)."""
+
+    event_type: ClassVar[str] = "situation.changed"
+    situation_id: uuid.UUID
+    changes: dict[str, Any]
+    previous: dict[str, Any] = Field(default_factory=dict)
+
+
+class SituationClosed(EventPayload):
+    event_type: ClassVar[str] = "situation.closed"
+    situation_id: uuid.UUID
+    reason: str = ""
+    status: str = "closed"  # closed | expired
+
+
+class ConsequenceApplied(EventPayload):
+    """One consequence from the closed vocabulary was validated and applied (DECISIONS 10d):
+    who earned it, from which proposal (ruling, actor, engine fallback) and what it did. The
+    domain events it implies are caused by this one."""
+
+    event_type: ClassVar[str] = "consequence.applied"
+    kind: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    actor_id: uuid.UUID | None = None
+    source: str  # ruling | actor | engine
+    branch: str | None = None  # success | failure
+    result: str = ""
 
 
 PAYLOAD_TYPES: dict[str, type[EventPayload]] = {
@@ -721,6 +770,10 @@ PAYLOAD_TYPES: dict[str, type[EventPayload]] = {
         CampaignStarted,
         SettingsChanged,
         ActorPromoted,
+        SituationOpened,
+        SituationChanged,
+        SituationClosed,
+        ConsequenceApplied,
     )
 }
 

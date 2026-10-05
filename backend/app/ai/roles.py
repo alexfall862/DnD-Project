@@ -109,6 +109,9 @@ class AIPlayerOut(Lenient):
     goal_updates: list[GoalUpdateOut] = Field(default_factory=list)
     relationship_proposals: list[RelationshipProposalOut] = Field(default_factory=list)
     fallback_policy: FallbackPolicyOut | None = None
+    # what this character makes happen by its own say-so (DECISIONS 10d): lets someone pass,
+    # promises, introduces itself… flat objects {"kind": ..., params}
+    consequences: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SpeechActOut(Lenient):
@@ -130,6 +133,7 @@ class NPCActorOut(Lenient):
     emotion_proposals: list[EmotionProposalOut] = Field(default_factory=list)
     relationship_proposals: list[RelationshipProposalOut] = Field(default_factory=list)
     fallback_policy: FallbackPolicyOut | None = None
+    consequences: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class IntentItemOut(Lenient):
@@ -188,6 +192,9 @@ class NPCMaterializerOut(Lenient):
     they witnessed. No world facts: what they claim stays a claim."""
 
     summary: str = Field(min_length=1, max_length=400)
+    # their own name, for an extra who had none (play session 3: "Irritated merchant" was the
+    # only name to learn); nobody knows it until they tell it
+    personal_name: str = Field(default="", max_length=60)
     occupation: str = ""
     temperament: str = ""
     dimensions: dict[str, float] = Field(default_factory=dict)
@@ -228,6 +235,11 @@ class RulesAdjudicatorOut(Lenient):
     summary: str = ""
     # what is at stake, in the player's terms: {"success": ..., "failure": ..., "retry": ...}
     stakes: dict[str, str] = Field(default_factory=dict)
+    # what changes in the world on each branch (DECISIONS 10d): {"success": [...], "failure":
+    # [...]}, each a flat {"kind": ..., params} from the consequence list
+    consequences: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    # the situation ref the attempt is aimed at (an obstacle), if any
+    addresses: str | None = None
 
 
 class MemoryCandidateOut(Lenient):

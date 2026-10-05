@@ -441,6 +441,74 @@ class ActionService:
         await self._commit(h, loaded, out, req, turn_id)
         return out
 
+    async def apply_effects(
+        self,
+        h: CampaignHandle,
+        scene_id: uuid.UUID,
+        *,
+        source_key: str,
+        effects: list[tuple[str, list[dict[str, Any]]]],
+        reveal_for: str | None = None,
+        description: str,
+        turn_id: uuid.UUID | None = None,
+    ) -> ActionOutcome:
+        """Apply registered effect primitives to the named actors of a scene, as one committed
+        action by `source_key` (a consequence, DECISIONS 10d: coin paid, someone hurt, healed,
+        shoved, a concealed thing found). Nothing is rolled here except dice amounts."""
+        loaded = await self.load_scene(h, scene_id)
+        ctx = loaded.ctx
+        from app.engine.actions import ActionRequest as _AR
+        from app.engine.actions import ResolutionTrace, StepRecord
+        from app.engine.ruleset import EffectStep
+
+        req = _AR(
+            source_key,
+            "action.improvised",
+            None,
+            params={"description": description, "consequence": True},
+            source="engine",
+        )
+        trace = ResolutionTrace(
+            "action.improvised",
+            source_key,
+            None,
+            rules_consulted=["consequence"],
+            summary=description,
+        )
+        out = ActionOutcome(req, "resolving", trace=trace)
+        for target_key, steps in effects:
+            if target_key not in ctx.states:
+                out.status, out.reason = "invalid", "they are not here"
+                return out
+            step = StepRecord("effects", "ok", {"target": target_key})
+            ectx = ctx.effect_ctx(source_key)
+            try:
+                step.mutations += apply_steps(
+                    [EffectStep.model_validate(s) for s in steps], ctx.states[target_key], ectx
+                )
+            except Exception as exc:  # noqa: BLE001 - an effect the state cannot take
+                out.status, out.reason = "invalid", str(exc)
+                return out
+            step.rolls += ectx.rolls
+            out.steps.append(step)
+        if reveal_for is not None:
+            await self._reveal_concealed(loaded, out, _AR(reveal_for, "action.search", None))
+        out.status = "succeeded"
+        trace.rolls = [r for s_ in out.steps for r in s_.rolls]
+        trace.mutations = out.mutations
+        out.events.append(
+            {
+                "type": "action.resolved",
+                "actor": source_key,
+                "action": "action.improvised",
+                "target": None,
+                "status": "succeeded",
+                "time_cost_seconds": 0,
+            }
+        )
+        await self._commit(h, loaded, out, req, turn_id)
+        return out
+
     async def start_encounter(
         self, h: CampaignHandle, scene_id: uuid.UUID, sides: dict[uuid.UUID, str]
     ) -> Encounter:

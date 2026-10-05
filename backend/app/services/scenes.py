@@ -348,6 +348,21 @@ class SceneService:
                     a.current_scene_id = target.id
                     a.updated_event_id = started.id
             await self.session.flush()
+            # 4b. arriving somewhere teaches its name, unless the place hides it (play session
+            # 2: the party walked into the Warehouse District and read "somewhere unfamiliar")
+            dest_entity = await self.session.get(Entity, dest.entity_id)
+            if (
+                dest_entity is not None
+                and dest_entity.canonical_name
+                and not (dest.properties or {}).get("name_hidden")
+            ):
+                from app.services.knowledge import KnowledgeService
+
+                ks = KnowledgeService(self.session)
+                for a in actors:
+                    await ks.learn_identity(
+                        h, a.id, dest_entity.id, dest_entity.canonical_name, tx=tx, cause=first
+                    )
             # 5. arrival observations: what everyone present can plainly see
             await self._arrival_observations(tx, first, target, actors, dest)
         return TravelResult(

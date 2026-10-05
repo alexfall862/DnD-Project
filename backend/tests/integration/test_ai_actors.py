@@ -1323,7 +1323,9 @@ async def test_a_social_action_is_spoken_and_rolled_by_the_engine(
     social = [a for a in res.actions if a["action"].startswith("social.")]
     assert [a["action"] for a in social] == ["social.persuade"]  # two intents, one check
     assert res.visible_rolls and res.visible_rolls[0]["purpose"] == "Persuasion"
-    assert "rules_adjudicator" not in res.metrics["calls_by_role"]
+    # one ruling for the social attempt (difficulty, consequences; DECISIONS 10d); the skill
+    # stays Persuasion whatever the ruling says
+    assert res.metrics["calls_by_role"].get("rules_adjudicator") == 1
     heard = (
         (await session.execute(select(Claim).where(Claim.speaker_actor_id == w.actors["Alex"])))
         .scalars()

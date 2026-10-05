@@ -30,10 +30,14 @@ Keep `params` empty unless a value matters. Be brief.
 
 `action_type` must be one of: attack, move, travel, sprint, engage, disengage, withdraw,
 take_cover, search, pick_up, drop, short_rest, long_rest, wait, flee, surrender, defend,
-protect, read, say, ask, whisper, persuade, deceive, intimidate, bribe, perform, look, other.
+protect, read, buy, sell, say, ask, whisper, persuade, deceive, intimidate, bribe, perform,
+look, other.
 Talking IS the action for conversation: plain talk is say/ask/whisper; trying to get someone
 to agree, accept a deal or give something up is persuade; lying or bluffing is deceive;
-threats are intimidate; paying someone off is bribe. Use "other" only for a physical deed no
+threats are intimidate (including a demand backed by a consequence: "or else", "unless",
+"your captain will hear about this"); paying someone off is bribe. Buying goods or services (a meal,
+a room, rope, a wagon) is buy, selling something you carry is sell, both with target_ref
+the person you trade with; haggling over a price is persuade. Use "other" only for a physical deed no
 listed type covers (it is ruled on separately). Never invent new type names.
 
 `utterance` (REQUIRED whenever any intent is say, ask, whisper or a social action): the
@@ -41,6 +45,15 @@ exact words the character says aloud, first person, as a
 short line of dialogue. If the player quoted words, use those; if they described speech ("I ask
 where he's from"), write the line ("Where are you coming from?"); never include stage
 directions ("I motion to Elara") in it. Omit it when nobody speaks.
+
+Moving: "move" is only for a spot within this scene (a zone ref). Going somewhere else —
+entering a town or building, going through a gate or door to what lies beyond, going back
+out, heading on, following someone who left — is "travel" with target_ref set to one of the
+"places to travel to" refs. Never use move to the zone the character is already in.
+
+Looking for something hidden or a way through ("look for another way in", "search for
+tracks", "check the wall for a gap") is "search"; trying a skill on something ("pick the
+lock", "climb the wall", "sneak past") is "other".
 
 Questions the player asks the table about the scene ("Where are we?", "What do I see?",
 "Describe my surroundings") are action_type look with channel do, not speech.

@@ -1,4 +1,4 @@
-# Progress report — 2026-10-04
+# Progress report — 2026-10-05
 
 Where the AI TTRPG engine stands against the v0.2 plan (`tasks/README.md`), what is proven, and
 what remains before v0.1. Milestone status detail lives in each `tasks/milestone-*.md`;
@@ -28,9 +28,16 @@ architectural decisions in `DECISIONS.md`.
 | 12 | Branching (timelines from an event) | Not started |
 | 13 | Polish / v0.1 release | Not started |
 
-Full backend suite: 379 passing tests (FakeModelProvider + real `ttrpg_test` database), about
-6 minutes, with 6 opt-in real-model evals skipped. Browser client: 10 Vitest and 15 Playwright
+Full backend suite: 396 passing tests (FakeModelProvider + real `ttrpg_test` database), about
+5 minutes, with the opt-in real-model evals skipped. Browser client: 10 Vitest and 23 Playwright
 tests (`make web-test`, `make e2e`).
+
+Since the second browser session (10d, `DECISIONS.md`, "Outcomes change the world"):
+- Attempts change the world through recorded situations and 34 kinds of consequence.
+- Travel is stopped only by a recorded obstacle, never by prose, and the engine guarantees a
+  way past.
+- Coin and a price list, so buying and selling cost something.
+- Check mode, table-assistant suggestions, and a Here strip in the browser.
 
 ## What is proven (by tests you can run with `make test`)
 
@@ -153,11 +160,13 @@ exit criteria; latency work against the real model; release packaging.
   - The median turn takes about 34 s; the worst turns take 70–130 s (claim extraction in
     sequence, and interpreter repairs).
   - GLM sometimes omits the spoken `utterance`.
-  - Game-master pacing (a director nudge) is deferred until after these fixes.
+  - Game-master pacing (a director nudge) stays deferred (10d decision: things should work
+    without it).
   - Narration occasionally misplaces known things.
   - The interpreter sometimes takes a request to a companion as the player's own action.
-- Browser client: unnamed places show as "Somewhere unfamiliar" (no public descriptor in the
-  scene view). The 20-turn playtest rubric is now unblocked.
+- The 20-turn playtest rubric is unblocked.
+- Consequences are proposed by models. How often GLM uses them well, rather than the engine's
+  safety net, is measured by `tests/eval/test_outcomes_a9.py`.
 - Intent Interpreter cost (~10 s/turn): shorter prompt or a small co-resident model for
   `fast_structured` roles — a question for the A9 host.
 - Section 4 catch-up for NPC scenes uses plan clocks and scheduled events; "plan step completes

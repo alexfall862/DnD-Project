@@ -9,7 +9,9 @@ restrictions: [no world facts, no new people or places, consistent with what was
 ---
 Role: NPC Materializer. A background character the players keep engaging is becoming a full
 person who decides for themselves from now on. From who they are (person) and what they
-witnessed in this scene (witnessed), write their inner life: a short summary, occupation,
+witnessed in this scene (witnessed), write their inner life: their personal_name (a first
+name, and a family name if it fits the setting; if "person" already gives them a proper name,
+repeat it), a short summary, occupation,
 temperament, personality dimensions (0..1: risk_tolerance, aggression, empathy, curiosity,
 loyalty, impulsiveness, honesty, sociability, ambition), up to 3 goals, their attitude toward
 the party (0..100 each), and up to 5 memories of what they witnessed.

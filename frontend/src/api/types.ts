@@ -76,7 +76,7 @@ export interface Sheet {
   attributes: SheetEntry[];
   skills: SheetEntry[];
   traits: SheetEntry[];
-  resources: { key: string; name: string; current: number; max: number }[];
+  resources: { key: string; name: string; current: number; max: number; tracked_as?: "pool" | "count" }[];
   conditions: { key: string; name: string; intensity: number }[];
 }
 
@@ -129,6 +129,8 @@ export interface PlayRequestBody {
   clarification_id?: Uuid;
   roll_request_id?: Uuid;
   roll_decision?: "roll" | "reconsider";
+  /** Check mode: the skill the player calls for (skill.investigation or investigation). */
+  check_skill?: string;
 }
 
 export interface SpeakerLine {
@@ -214,6 +216,29 @@ export interface PlayResult {
   ooc: string | null;
   dev_notes?: string[];
   roll_request?: RollRequest | null;
+  /** Things to try next, offered by the table assistant (OOC). */
+  suggestions?: string[];
+  /** What changed in the world because of this turn (recorded consequences). */
+  consequences?: Consequence[];
+}
+
+export interface Consequence {
+  kind: string;
+  ok: boolean;
+  text: string;
+  source?: string;
+  by?: string;
+}
+
+/** Where the focus character is, as they perceive it (GET /characters/{id}/here). */
+export interface Here {
+  actor_id: Uuid;
+  location: string;
+  scene_type: string;
+  zone: string | null;
+  zones: { key: string; name: string; features: string[]; people: string[]; you_are_here: boolean; adjacent: boolean }[];
+  exits: { location_id: Uuid; known_as: string; travel_minutes: number; blocked_by: string | null }[];
+  situations: { kind: string; text: string }[];
 }
 
 export interface Clarification {

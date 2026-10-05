@@ -84,6 +84,23 @@ def script(fake) -> None:
         "memory_processor", {"memories": [], "belief_proposals": [], "emotion_proposals": []}
     )
     fake.register("journal_writer", {"title": "Red Lantern", "body": "Mira is hiding something."})
+    # rulings name what changes in the world (DECISIONS 10d); moderate keeps "need 14"
+    fake.register(
+        "rules_adjudicator",
+        {
+            "requires_check": True,
+            "check": {"difficulty": "moderate"},
+            "stakes": {"success": "You find what you are after.", "failure": "Nothing turns up."},
+            "summary": "a careful look",
+            "consequences": {
+                "success": [{"kind": "reveal_feature", "description": "a loose hearthstone"}]
+            },
+        },
+    )
+    fake.register(
+        "table_assistant",
+        "You could look the hearth over.\nTRY: I search the hearth for a loose stone",
+    )
 
 
 def build():

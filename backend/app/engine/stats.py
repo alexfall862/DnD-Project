@@ -223,7 +223,16 @@ class ActorState:
         for k in ruleset.resources:
             given = profile.get("resources", {}).get(k)
             if given is None:
-                state.resources[k] = ResourceState(current=calc.resource_max(state, k).value)
+                rdef = ruleset.resources[k]
+                if rdef.initial_formula is not None:
+                    from app.engine.expressions import compile_expr, evaluate_int
+
+                    start = evaluate_int(
+                        compile_expr(rdef.initial_formula), calc.resolver(state, {})
+                    )
+                else:
+                    start = calc.resource_max(state, k).value
+                state.resources[k] = ResourceState(current=start)
             else:
                 state.resources[k] = ResourceState(current=int(given["current"]))
         for k in profile.get("resources", {}):

@@ -34,6 +34,7 @@ from app.persistence.models import (
 )
 from app.services.events import EventTransaction
 from app.services.perspective import PerspectiveService
+from app.services.prose import prose_only
 from app.services.turns import Turn
 from app.services.world import CampaignHandle
 
@@ -71,6 +72,10 @@ class NarrativeBundle:
     outcomes: list[str] = field(default_factory=list)
     # this scene so far, as the focus player saw it (continuity; play session 2026-10-05)
     recent: list[str] = field(default_factory=list)
+    # people present who are played (AI or human): the narrator never speaks for them
+    living: list[str] = field(default_factory=list)
+    # the objective situation here as the focus actor perceives it (obstacles, statuses…)
+    situation_lines: list[str] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
@@ -89,6 +94,13 @@ class NarrativeBundle:
             parts.append("Dialogue you heard, verbatim:\n- " + "\n- ".join(self.dialogue))
         if self.compressed:
             parts.append("Also, briefly: " + " ".join(self.compressed))
+        if self.living:
+            parts.append(
+                "Living characters present (they speak only in 'Dialogue you heard'; never "
+                "voice them): " + ", ".join(self.living)
+            )
+        if self.situation_lines:
+            parts.append("Situation (true right now):\n- " + "\n- ".join(self.situation_lines))
         return "\n\n".join(parts) or "Nothing of note happened."
 
     def mechanics_text(self) -> str:
@@ -122,6 +134,7 @@ class NarrationService:
         compressed: list[str] | None = None,
         outcomes: list[str] | None = None,
         recent: list[str] | None = None,
+        situation_lines: list[str] | None = None,
     ) -> NarrativeBundle:
         """Only the focus actor's own Observations for this turn's events, the transcript lines
         of speech events whose recipients include them, and mechanics they can see."""
@@ -193,6 +206,13 @@ class NarrationService:
             if view
             else "nowhere in particular"
         )
+        living: list[str] = []
+        if view:
+            for x in view.participants:
+                if x.is_self or x.actor_id is None:
+                    continue
+                if await self.perspective.repo.controller_type(x.actor_id) in ("ai", "human"):
+                    living.append(x.known_as)
         base = SHORT_STYLE if short else DEFAULT_STYLE
         if isinstance(style, str):
             style = STYLE_PRESETS.get(style, {})
@@ -207,6 +227,8 @@ class NarrationService:
             list(compressed or []),
             list(outcomes or []),
             list(recent or []),
+            living,
+            list(situation_lines or []),
         )
 
     async def _speaker_name(
@@ -245,8 +267,9 @@ class NarrationService:
                 "scene": "Scene: " + bundle.scene_line,
                 **(
                     {
-                        "recent_turns": "This scene so far (oldest first; for continuity only, do "
-                        "not retell it):\n- " + "\n- ".join(bundle.recent)
+                        "recent_turns": "Earlier in this scene, what was said and done (oldest "
+                        "first; for continuity only: do not retell it, do not repeat anyone's "
+                        "earlier words):\n- " + "\n- ".join(bundle.recent)
                     }
                     if bundle.recent
                     else {}
@@ -255,6 +278,7 @@ class NarrationService:
         )
         chunks: list[str] = []
         final: RunResult | None = None
+        structured: bool | None = None  # JSON or a fence: not streamed, unwrapped at the end
         async for item in self.runner.stream(h, ctx, turn_id=turn.turn_id):
             if isinstance(item, RunResult):
                 final = item
@@ -262,7 +286,10 @@ class NarrationService:
                 if not chunks:
                     turn.mark_first_narration()
                 chunks.append(item)
-                emit("narration_delta", {"text": item})
+                if structured is None and "".join(chunks).strip():
+                    structured = "".join(chunks).lstrip()[:1] in ("{", "[", "`")
+                if structured is False:
+                    emit("narration_delta", {"text": item})
         turn.record_call(
             "narrator",
             calls=1,
@@ -270,7 +297,10 @@ class NarrationService:
             completion_tokens=final.completion_tokens if final else None,
             context_tokens=ctx.estimated_tokens,
         )
-        text = "".join(chunks).strip()
+        text = prose_only("".join(chunks))
+        if structured and text:
+            turn.notes.append("narrator answered in JSON; prose recovered")
+            emit("narration_delta", {"text": text})
         if final is None or not final.ok or not text:
             turn.notes.append("narrator failed; plain structured result shown")
             return None, final

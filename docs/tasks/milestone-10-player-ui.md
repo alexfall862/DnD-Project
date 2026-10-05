@@ -90,3 +90,49 @@ Tests:
 | Playwright | 15: desktop, phone and Frostbridge, now including dice, live status and group whispers |
 
 `tests/eval/test_session_replay_a9.py` replays the session's own lines on A9.
+
+### Outcomes change the world (10d): done 2026-10-05
+
+The second play session (campaign `879ea872`) showed the engine could not record what attempts
+achieved. The design and decisions are in `DECISIONS.md`, "Outcomes change the world (10d)".
+
+**Phase 1:**
+- Moves to where you stand are no-ops, with the ways out listed. Entering, leaving and
+  following mean travel.
+- JSON is stripped from prose answers.
+- The table assistant remembers its earlier answers and offers `TRY:` suggestion chips.
+- The composer has a Check mode (`check_skill`).
+- A whisper with nobody picked goes to the companions present.
+- The Here strip (`GET /characters/{id}/here`).
+- Arriving somewhere teaches its name.
+- At most one promotion per turn, and reactions follow the order the player addressed people.
+- The narrator never voices living characters or repeats earlier lines.
+- Earlier narration is no longer fed back as fact.
+- The composer draft survives switching views.
+
+**Phase 2:**
+- `situations` (migration 0018): obstacles, statuses, promises, clocks, alarms, prices, debts
+  and followers.
+- 34 consequence kinds (`app/domain/consequences.py`) applied by `ConsequenceService`, with
+  events.
+- Rulings carry `consequences` per branch and `addresses`.
+- Social attempts get one ruling.
+- NPCs and AI players propose consequences about themselves.
+- Travel is stopped only by a recorded obstacle; the safety net prevents soft-blocks.
+- The party travels together by default.
+
+**Phase 3:**
+- `resource.coin` (`initial_formula`, `tracked_as: count`) and a goods list (`goods.yaml`).
+- Buy and sell (`app/services/trade.py`): list price adjusted by `set_price`, and nothing
+  happens without the coin. Haggling sets the price.
+- Self-introductions teach names, and the encyclopedia lists unnamed people met.
+
+The GM director stays deferred.
+
+Tests:
+
+| Area | Where |
+|---|---|
+| Backend | `test_consequences.py` (13), `test_prose.py`, and new cases in `test_player_api.py` and `test_target_words.py` |
+| Playwright | 4 new tests, on desktop and phone: Here, draft, Check mode, table-assistant suggestion |
+| A9 | `tests/eval/test_outcomes_a9.py` |

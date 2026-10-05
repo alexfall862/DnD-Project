@@ -154,7 +154,22 @@ interface TurnsState {
     targets: Target[],
     clarificationId?: string,
     roll?: { id: string; decision: "roll" | "reconsider" },
+    checkSkill?: string,
   ) => Promise<void>;
+  /** The composer's unsent text: kept here (and per browser tab) so changing views keeps it
+   * (play session 2: a half-written turn was lost on a trip to the encyclopedia). */
+  draft: string;
+  setDraft: (text: string) => void;
+}
+
+const draftKey = (cid: string, actor: string) => `ttrpg.draft.${cid}.${actor}`;
+
+function loadDraft(key: string): string {
+  try {
+    return window.sessionStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
 }
 
 const Ctx = createContext<TurnsState | null>(null);
@@ -166,6 +181,23 @@ export function TurnsProvider({ children }: { children: ReactNode }) {
   const [feedError, setFeedError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const owner = useRef("");
+  const [draft, setDraftState] = useState("");
+  useEffect(() => {
+    if (cid && focusActorId) setDraftState(loadDraft(draftKey(cid, focusActorId)));
+  }, [cid, focusActorId]);
+  const setDraft = useCallback(
+    (text: string) => {
+      setDraftState(text);
+      if (!cid || !focusActorId) return;
+      try {
+        if (text) window.sessionStorage.setItem(draftKey(cid, focusActorId), text);
+        else window.sessionStorage.removeItem(draftKey(cid, focusActorId));
+      } catch {
+        // storage unavailable: the draft still lives in memory
+      }
+    },
+    [cid, focusActorId],
+  );
 
   useEffect(() => {
     const key = `${cid}:${focusActorId}`;
@@ -196,12 +228,13 @@ export function TurnsProvider({ children }: { children: ReactNode }) {
       targets: Target[],
       clarificationId?: string,
       roll?: { id: string; decision: "roll" | "reconsider" },
+      checkSkill?: string,
     ) => {
       if (!cid || !focusActorId) return;
       const key = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const turn: FeedTurn = {
         key,
-        input: { text, channel, to: targets.map((t) => t.known_as) },
+        input: { text: checkSkill ? `[${checkSkill} check] ${text}` : text, channel, to: targets.map((t) => t.known_as) },
         status: "streaming",
         live: emptyLive(Date.now()),
       };
@@ -220,6 +253,7 @@ export function TurnsProvider({ children }: { children: ReactNode }) {
             clarification_id: clarificationId,
             roll_request_id: roll?.id,
             roll_decision: roll?.decision,
+            check_skill: checkSkill,
           },
           (e) => update((t) => ({ ...t, turnId: t.turnId ?? (e.name === "accepted" ? e.data.turn_id : undefined), live: applyEvent(t.live, e, Date.now()) })),
         );
@@ -239,7 +273,7 @@ export function TurnsProvider({ children }: { children: ReactNode }) {
     [cid, focusActorId, bump],
   );
 
-  return <Ctx.Provider value={{ feed, feedError, busy, send }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ feed, feedError, busy, send, draft, setDraft }}>{children}</Ctx.Provider>;
 }
 
 export function useTurns(): TurnsState {

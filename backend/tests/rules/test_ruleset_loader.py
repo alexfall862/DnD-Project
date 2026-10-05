@@ -12,7 +12,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.rules]
 
 def test_core_adventure_loads_and_validates(core: Ruleset) -> None:
     assert core.key == "core_adventure" and core.manifest.version == "0.1.0"
-    assert len(core.attributes) == 5 and len(core.skills) == 16 and len(core.resources) == 3
+    assert len(core.attributes) == 5 and len(core.skills) == 16 and len(core.resources) == 4
     assert {"condition.burning", "condition.hidden", "condition.incapacitated"} <= set(
         core.conditions
     )

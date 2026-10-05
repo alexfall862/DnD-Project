@@ -16,7 +16,13 @@ const clean = (k: string) => k.replace(/^(condition|resource|skill|attr|trait|it
 export function ResourceBars({ sheet }: { sheet: Sheet }) {
   return (
     <div className="stack">
-      {sheet.resources.map((r) => (
+      {sheet.resources.map((r) =>
+        r.tracked_as === "count" ? (
+          <div key={r.key} className="row" style={{ justifyContent: "space-between" }}>
+            <span className="small">{r.name}</span>
+            <span className="small mono">{r.current}</span>
+          </div>
+        ) : (
         <div key={r.key}>
           <div className="row" style={{ justifyContent: "space-between" }}>
             <span className="small">{r.name}</span>
@@ -28,7 +34,8 @@ export function ResourceBars({ sheet }: { sheet: Sheet }) {
             <span style={{ width: `${r.max ? Math.max(0, Math.min(100, (100 * r.current) / r.max)) : 0}%` }} />
           </div>
         </div>
-      ))}
+        ),
+      )}
     </div>
   );
 }

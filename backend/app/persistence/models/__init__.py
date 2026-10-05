@@ -73,6 +73,7 @@ from app.persistence.models.rules import (
     RulingPrecedent,
 )
 from app.persistence.models.scene import Scene, SceneParticipant
+from app.persistence.models.situation import Situation
 
 __all__ = [
     "EncyclopediaEntry",
@@ -89,6 +90,7 @@ __all__ = [
     "TurnMetrics",
     "PlayerTurn",
     "PendingRoll",
+    "Situation",
     "BackgroundJob",
     "GenerationRun",
     "GenerationStage",

@@ -76,6 +76,17 @@ SPEECH_TYPES = {
     "apologize",
     "speak_to",
 }
+# buying and selling at the ruleset's prices (DECISIONS 10d, Phase 3; app/services/trade.py)
+TRADE_TYPES = {"buy", "sell"}
+TRADE_SYNONYMS = {
+    "purchase": "buy",
+    "order": "buy",
+    "rent": "buy",
+    "hire": "buy",
+    "pay_for": "buy",
+    "book": "buy",
+    "sell_to": "sell",
+}
 FREE_TYPES = {"look", "observe", "watch", "listen", "think", "consider", "none", "nothing"}
 READ_TYPES = {"read", "study", "peruse", "read_document"}
 
@@ -137,6 +148,8 @@ CANONICAL_TYPES = [
         }
     ),
     "read",
+    "buy",
+    "sell",
     "say",
     "ask",
     "whisper",
@@ -150,10 +163,12 @@ def canonical_kind(word: str, channel: str) -> str:
     """One action word in the engine's vocabulary. Unknown words in speech are speech;
     unknown deeds stay as they are and go to the Rules Adjudicator."""
     w = word.lower().strip().replace(" ", "_").replace("-", "_")
-    if w in SOCIAL_SKILLS:
+    if w in SOCIAL_SKILLS or w in TRADE_TYPES:
         return w
     if w in SOCIAL_SYNONYMS:
         return SOCIAL_SYNONYMS[w]
+    if w in TRADE_SYNONYMS:
+        return TRADE_SYNONYMS[w]
     if w in ACTION_MAP or w in SPEECH_TYPES or w in FREE_TYPES or w in READ_TYPES:
         return w
     if w.startswith("action."):
@@ -164,6 +179,10 @@ def canonical_kind(word: str, channel: str) -> str:
             return head
         if head in SOCIAL_SYNONYMS:
             return SOCIAL_SYNONYMS[head]
+        if head in TRADE_TYPES:
+            return head
+        if head in TRADE_SYNONYMS:
+            return TRADE_SYNONYMS[head]
         if head in ACTION_MAP or head in READ_TYPES:
             return head
     if channel in ("say", "whisper"):

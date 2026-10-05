@@ -9,6 +9,7 @@ import type {
   DebugActor,
   EncyclopediaEntry,
   FeedEntry,
+  Here,
   InventoryItem,
   JournalEntry,
   PartyMember,
@@ -71,6 +72,7 @@ export const api = {
   party: (id: Uuid, actor: Uuid) =>
     request<PartyMember[]>(`/campaigns/${id}/party${q({ actor_id: actor })}`),
   sheet: (actor: Uuid) => request<Sheet>(`/characters/${actor}/sheet`),
+  here: (actor: Uuid) => request<Here>(`/characters/${actor}/here`),
   inventory: (actor: Uuid) => request<InventoryItem[]>(`/characters/${actor}/inventory`),
   feed: (actor: Uuid, limit = 200) =>
     request<FeedEntry[]>(`/characters/${actor}/feed${q({ limit: String(limit) })}`),

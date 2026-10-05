@@ -1,0 +1,38 @@
+# Prices in coin (DECISIONS 10d, Phase 3). What a seller asks the party: the list price,
+# adjusted by that seller's recorded price for the party (set_price: haggling, favour, anger).
+# Selling to a merchant fetches half the list price. `item` makes the bought thing a ruleset
+# item (with its mechanics); goods without one become plain items with the goods' name.
+goods:
+  - { key: goods.meal, name: Hot meal, price: 1, tags: [food] }
+  - { key: goods.ale, name: Mug of ale, price: 1, tags: [food, drink] }
+  - { key: goods.room, name: Night's lodging, price: 3, unit: night, tags: [service] }
+  - { key: goods.bath, name: Hot bath, price: 1, tags: [service] }
+  - { key: goods.rations, name: Trail rations, price: 2, unit: day, item: item.travel_supplies, tags: [food] }
+  - { key: goods.rope, name: Rope, price: 2, tags: [gear] }
+  - { key: goods.torch, name: Torch, price: 1, tags: [gear, light_source] }
+  - { key: goods.lantern, name: Oil lantern, price: 5, item: item.oil_lantern, tags: [gear] }
+  - { key: goods.lamp_oil, name: Flask of lamp oil, price: 1, tags: [gear] }
+  - { key: goods.satchel, name: Satchel, price: 3, item: item.satchel, tags: [gear] }
+  - { key: goods.cloak, name: Warm cloak, price: 4, tags: [clothing] }
+  - { key: goods.boots, name: Sturdy boots, price: 5, tags: [clothing] }
+  - { key: goods.knife, name: Knife, price: 3, item: item.knife, tags: [weapon] }
+  - { key: goods.dagger, name: Dagger, price: 6, item: item.dagger, tags: [weapon] }
+  - { key: goods.club, name: Club, price: 1, item: item.club, tags: [weapon] }
+  - { key: goods.sword, name: Sword, price: 25, item: item.sword, tags: [weapon] }
+  - { key: goods.great_axe, name: Great axe, price: 35, item: item.great_axe, tags: [weapon] }
+  - { key: goods.bow, name: Bow, price: 30, item: item.bow, tags: [weapon] }
+  - { key: goods.light_armor, name: Light armour, price: 20, item: item.light_armor, tags: [armour] }
+  - { key: goods.medium_armor, name: Medium armour, price: 60, item: item.medium_armor, tags: [armour] }
+  - { key: goods.heavy_armor, name: Heavy armour, price: 150, item: item.heavy_armor, tags: [armour] }
+  - { key: goods.shield, name: Shield, price: 10, item: item.shield, tags: [armour] }
+  - { key: goods.healing_herbs, name: Healing herbs, price: 4, tags: [medicine] }
+  - { key: goods.bandages, name: Bandages, price: 1, tags: [medicine] }
+  - { key: goods.spices, name: Sack of spices, price: 12, tags: [trade] }
+  - { key: goods.grain, name: Sack of grain, price: 2, tags: [trade] }
+  - { key: goods.cloth, name: Bolt of cloth, price: 8, tags: [trade] }
+  - { key: goods.mule, name: Mule, price: 40, tags: [animal] }
+  - { key: goods.horse, name: Riding horse, price: 90, tags: [animal] }
+  - { key: goods.cart, name: Handcart, price: 15, tags: [vehicle] }
+  - { key: goods.wagon, name: Wagon, price: 150, tags: [vehicle] }
+  - { key: goods.passage, name: Passage on a boat, price: 10, tags: [service] }
+  - { key: goods.bribe_small, name: A small bribe, price: 5, tags: [service] }

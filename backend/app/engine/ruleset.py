@@ -97,6 +97,10 @@ class ResourceDef(Definition):
     recovery: dict[str, Formula] = Field(
         default_factory=dict
     )  # {"short_rest": "...", "long_rest": "..."}
+    # the starting amount when it differs from the maximum (coin: a purse, not a cap)
+    initial_formula: Formula | None = None
+    # pool: current/max (health); count: just a number (coin)
+    tracked_as: Literal["pool", "count"] = "pool"
 
 
 class DerivedStatDef(Definition):
@@ -216,6 +220,14 @@ class EquipmentDef(Definition):
     two_handed: bool = False
 
 
+class GoodsDef(Definition):
+    """Something a seller can sell (DECISIONS 10d, Phase 3): its list price in coin."""
+
+    price: int = Field(ge=0)
+    unit: str = "each"
+    item: str | None = None  # an item.* template the purchase becomes
+
+
 class RulesetManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     key: str
@@ -253,6 +265,7 @@ DEF_TYPES: dict[str, type[Definition]] = {
     "damage_types": DamageTypeDef,
     "actions": ActionDef,
     "equipment": EquipmentDef,
+    "goods": GoodsDef,
 }
 PREFIX: dict[str, str] = {
     "attributes": "attr.",
@@ -265,6 +278,7 @@ PREFIX: dict[str, str] = {
     "damage_types": "damage.",
     "actions": "action.",
     "equipment": "item.",
+    "goods": "goods.",
 }
 
 
@@ -351,6 +365,10 @@ class Ruleset:
     @property
     def equipment(self) -> dict[str, EquipmentDef]:
         return self.defs["equipment"]  # type: ignore[return-value]
+
+    @property
+    def goods(self) -> dict[str, GoodsDef]:
+        return self.defs["goods"]  # type: ignore[return-value]
 
     def degree_for_margin(self, margin: int) -> MarginBand:
         for band in self.manifest.margins:

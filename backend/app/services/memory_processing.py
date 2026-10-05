@@ -316,6 +316,40 @@ class MemoryProcessingService:
 
     # -- encyclopedia ------------------------------------------------------------------------------
 
+    async def _people_met(
+        self, actor_id: uuid.UUID, names: dict[uuid.UUID, str]
+    ) -> dict[uuid.UUID, tuple[str, list[str]]]:
+        from app.persistence.models import Actor, Entity, PlayerTurn
+
+        rows = (
+            (
+                await self.session.execute(
+                    select(PlayerTurn)
+                    .where(PlayerTurn.actor_id == actor_id)
+                    .order_by(PlayerTurn.created_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        met: dict[uuid.UUID, tuple[str, list[str]]] = {}
+        for t in rows:
+            for sp in (t.result or {}).get("speakers", []) or []:
+                try:
+                    aid = uuid.UUID(str(sp.get("actor_id")))
+                except ValueError:
+                    continue
+                if aid == actor_id:
+                    continue
+                actor = await self.session.get(Actor, aid)
+                if actor is None or actor.entity_id in names:
+                    continue
+                ent = await self.session.get(Entity, actor.entity_id)
+                display = ((ent.metadata_ or {}).get("descriptor") if ent else None) or "someone"
+                prev = met.get(actor.entity_id, (display, []))[1]
+                met[actor.entity_id] = (display, [*prev, str(sp.get("text", ""))[:160]])
+        return met
+
     async def rebuild_encyclopedia(
         self, h: CampaignHandle, actor_id: uuid.UUID
     ) -> list[EncyclopediaEntry]:
@@ -351,7 +385,27 @@ class MemoryProcessingService:
             .scalars()
             .all()
         }
+        # people met but not yet known by name: whoever spoke to this player, from the
+        # player's own feed (what they saw), by how they look (play session 2: promoted
+        # guards could not be found again)
+        met = await self._people_met(actor_id, names)
         out: list[EncyclopediaEntry] = []
+        for eid, (display, heard) in met.items():
+            row = existing.get(eid)
+            if row is None:
+                row = EncyclopediaEntry(
+                    campaign_id=h.campaign_id,
+                    timeline_id=h.timeline_id,
+                    actor_id=actor_id,
+                    entity_id=eid,
+                    category="person",
+                    display_name=display,
+                )
+                self.session.add(row)
+            row.display_name, row.category = display, "person"
+            row.summary = f"{display}: you have not learned their name"
+            row.knowledge = {"heard": heard[-3:]}
+            out.append(row)
         for eid, display in names.items():
             category = await self._category(eid)
             knowledge = by_entity.get(eid, {})

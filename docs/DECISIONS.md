@@ -833,6 +833,179 @@ long inputs failed, OOC did nothing, and nothing showed a turn's progress. Fixes
 - The shared test fake for the interpreter matches only the player's input line, since the
   context now repeats earlier inputs in the scene log.
 
+### Outcomes change the world (10d) — decisions (2026-10-05, Alex)
+
+The second browser session (campaign `879ea872`, 55 turns at the Frostbridge gate) failed in
+a way no single bug explains. The gate was never closed in the world: Town Gate ↔ Market
+Square is an open route and the fixture has no inspection. The guards' "procedure" was
+invented by the models and kept alive by the scene log. When the party beat it, there was
+nothing to change:
+
+- A successful search established "a narrow gap in the hedgerow" as scenery, not a way
+  through.
+- A successful Intimidation changed nothing.
+- "Go in", "follow the merchant" and "go back out" became moves to the zone the party already
+  stood in. They failed with "already there", and the narrator dressed the failure as a
+  refusal.
+
+The models can only propose what the engine can commit. The engine had no vocabulary for
+obstacles, permissions, discovered routes, agreements or statuses.
+
+**Conflicting sections.**
+
+- rules-engine §13–§15 and §30–§31: rulings compose registered effect primitives that act on
+  actor state. World-level mutations (`reveal_information`, `change_relationship`,
+  `trigger_event`) were recorded as mutation requests but never applied.
+- orchestration §21: the narrator's continuity rule ("deals, threats and facts already
+  established there still stand") made earlier *narration* binding, though narration is never
+  state.
+
+**Smallest change.** Two additions, plus one narrowing:
+
+1. **Situations are objective state** (table `situations`, migration 0018; events
+   `situation.opened`, `situation.changed` and `situation.closed`). The kinds are obstacle,
+   status, commitment, clock, alarm, price, debt and follower. Each row has:
+   - a location or scene;
+   - optionally a subject (whose status or promise) and a holder (who enforces an obstacle);
+   - a label, data and visibility;
+   - an expiry tick.
+
+   Present actors perceive the public ones, so they reach the interpreter, actors, narrator
+   and table assistant through perspective-scoped sections. The adjudicator, an objective
+   role, sees them all.
+2. **A closed consequence vocabulary** (`app/domain/consequences.py`, 34 kinds), applied by
+   `ConsequenceService` after the action that earned them. Each one is validated:
+   - references must be the acting actor's candidates or visible situation refs;
+   - amounts are bounded;
+   - at most 4 consequences per branch.
+
+   Each is committed with its own events (`consequence.applied`, plus the domain event it
+   implies). The kinds:
+   - access and movement: grant_passage, remove_obstacle, add_obstacle, open_route,
+     close_route, escort, reposition;
+   - discovery: reveal_feature, learn, reveal_clue, reveal_item, introduce;
+   - people: change_attitude, agree, refuse, accompany, leave, distract, turn_hostile,
+     raise_alarm, owe_favor;
+   - status: set_status, clear_status, advance_clock;
+   - items and coin: pay, give_item, create_item, destroy_item, set_price;
+   - body and time: harm, heal, condition, pass_time, schedule.
+3. **Narration stays presentation.** The narrator's continuity comes from situations. Earlier
+   turns reach the narrator and interpreter as what was said and done, without earlier
+   narration, which was the parroting loop.
+
+**Who may propose consequences.**
+
+- **The Rules Adjudicator.** It returns `consequences: {success: [...], failure: [...]}` for
+  improvised attempts, social attempts and player-called checks. With no check, the success
+  list applies.
+- **NPC actors and AI players.** They propose only what they can do themselves:
+  - grant passage or lift an obstacle they hold, or raise one;
+  - agree or refuse; accompany or leave; introduce themselves;
+  - change their own attitude; give or pay from their own holdings;
+  - set a status on someone ("inspected"), raise an alarm, set their own prices, record a
+    debt.
+
+  The engine rejects anything else.
+- **Never the narrator or the interpreter.**
+
+**No soft-blocks** (Alex: "they just can't softblock playing the game"):
+
+- A model-created obstacle must name at least one way past (the engine adds "talk, sneak or
+  wait it out" when none is given). It lasts at most 6 game hours (default 1 hour).
+- An obstacle whose holder is absent, distracted, or has agreed to let the party pass does
+  not block.
+- A successful check aimed at an obstacle or its holder that resolved nothing grants the
+  party passage (the engine's safety net).
+- After three blocked attempts, the notice lists the ways past.
+- Travel along a blocked route is invalid, with the obstacle named. "Already there" is never
+  a failure.
+
+**Social attempts get one ruling.** It is cached, so a manual roll reuses it. It sets the
+difficulty from the situation and the consequences per branch. The skill stays the social
+skill. Without a ruling, the engine's fallback for success against an obstacle holder is
+grant_passage, and for success against anyone it is an attitude change.
+
+**Party movement.** The party travels together by default. A player leaves companions behind
+only by saying so ("alone", "without Tomas", "Elara stays").
+
+**Phase 1 fixes, no boundary change:**
+
+- Moves to the current zone are no-ops. "Go in", "enter", "follow" and "go back out" mean
+  travel.
+- JSON is stripped from the narrator's and table assistant's prose. The table assistant
+  remembers its last answers and offers actionable `TRY:` suggestions, rendered as chips. It
+  describes relationships in words, never as scores.
+- The composer has a "Check" mode: the player names a skill and the attempt; the adjudicator
+  rules with that skill required.
+- A whisper with no listener goes to the companions present.
+- A "Here" panel (`GET /characters/{id}/here`) shows your spot, nearby spots and who is in
+  them, exits with travel time and whether they are blocked, and the visible situations.
+- Arriving somewhere teaches its name unless the location's `properties.name_hidden` is set.
+  An unknown place reads by its descriptor or type.
+- At most one promotion per turn. Reactions follow the order the player addressed people in.
+- The narrator never voices living characters who did not speak this turn.
+- The composer draft survives switching views.
+
+**Phase 3:**
+
+- Coin is a counted holding (`resource.coin`). The ruleset has a price list (`prices.yaml`).
+  Buy and sell are engine actions at list price, adjusted by `set_price`. Haggling is a
+  Persuasion check that sets the price. A purchase you cannot afford is invalid.
+- People are learned by name through `introduce` (an NPC saying their name, or being
+  introduced). The encyclopedia lists people met, including unnamed ones, by where they were
+  met.
+
+The GM director stays deferred (Alex: "ideally things work without it once we fix issues").
+
+### Won over, escorts and names (10e) — decisions (2026-10-05, Alex)
+
+In play session 3 (campaign `7969656a`), two successful Persuasion checks on the merchant went
+nowhere:
+
+- He was never told he had been persuaded. His reaction prompt was built only from dialogue,
+  and the charm had no spoken words.
+- The second check matched no target, so he got no reaction at all. The narrator voiced his
+  acceptance instead.
+- He agreed to the escort, then drove off alone.
+- A ruling's `learn` gave him the name "Tomas", the same as the companion.
+- The player's narrated deeds ("We approach the merchant and introduce ourselves") were spoken
+  aloud as dialogue.
+
+Decisions:
+
+1. **Linked travel (Alex: option a).** An agreed escort (an `agree` whose request speaks of
+   escorting, accompanying, protecting or travelling together) or an `accompany` opens a
+   linked follower situation. Whoever travels, both go:
+   - the party takes the follower along (as before);
+   - an NPC leaving takes the linked party with them, and the player is told "You go along
+     with …, as agreed".
+
+   Promises are otherwise not enforced.
+2. **The narrator never voices a living character** who did not speak this turn. Sentences
+   quoting them are removed, like repeated lines. Unnamed, unpromoted bystanders may still
+   get a line.
+3. **A successful social check binds the NPC to a real concession.**
+   - Their reaction is told the attempt was convincing and that they must give ground with a
+     consequence.
+   - A refusal-type consequence they propose that turn (`refuse`, `turn_hostile`,
+     `add_obstacle`, `raise_alarm`) is dropped.
+   - The engine's safety net still applies.
+
+Fixes with no decision needed:
+
+- Reactions always carry the social result and everything already settled this turn, with or
+  without speech.
+- Whoever a consequence is about reacts.
+- A social attempt with no matched target is aimed at the conversation partner.
+- Promises render as "You promised Alex, Elara: …".
+- `learn` may not name anyone or anything not given to the rules model; names come only from
+  `introduce`.
+- Promotion gives a description-only extra a personal name (`ActorPromoted.name`), known to
+  nobody until they say it.
+- In Do and Auto, a narrated deed with no spoken words is an action toward the person
+  (`gesture`), not speech. Introducing yourselves teaches them the party's names.
+- The rules model writes compact output, with each consequence once.
+
 ### Pending
 - **2026-10-03, later:** A9 was updated after the spike. The project now serves **GLM-4.5-Air**
   as `ttrpg/local-general` (explicit model name; A9 never substitutes; 409 = not loaded, wait

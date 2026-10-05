@@ -133,6 +133,51 @@ test("a called-for check waits for the player's roll, and dev view certifies the
   await expect(page.getByTestId("roll-certificate")).toContainText("the same dice");
 });
 
+test("the Here strip shows your spot, who is where and the ways out", async ({ page }) => {
+  await openDemo(page);
+  await page.getByRole("button", { name: /Red Lantern Tavern/ }).click();
+  const here = page.getByTestId("here");
+  await expect(here).toContainText("Around you");
+  await expect(here).toContainText("(you are here)");
+  await expect(here).toContainText("Ways out");
+  await expect(here).toContainText("min");
+});
+
+test("an unsent turn survives a trip to another view", async ({ page }) => {
+  await openDemo(page);
+  await page.getByLabel("What do you do?").fill("I study the faces at the bar");
+  await page.getByRole("button", { name: "Character", exact: true }).first().click();
+  await page.getByRole("button", { name: "Play", exact: true }).first().click();
+  await expect(page.getByLabel("What do you do?")).toHaveValue("I study the faces at the bar");
+});
+
+test("Check mode calls for the named skill, and what it changes is shown", async ({ page }) => {
+  await openDemo(page);
+  await page.getByRole("button", { name: "Check", exact: true }).click();
+  await page.getByLabel("Skill to check").selectOption("skill.investigation");
+  await say(page, "the hearth for a loose stone");
+  const card = page.getByRole("region", { name: "A roll is called for" });
+  await expect(card).toContainText("Investigation check");
+  await card.getByRole("button", { name: "Roll", exact: true }).click();
+  const turn = page.locator("article.turn").last();
+  await expect(page.getByTestId("dice-roll").last()).toBeVisible({ timeout: 30_000 });
+  // on a success the ruling's consequence is recorded and shown; on a failure nothing changes
+  const die = page.getByTestId("dice-roll").last();
+  if ((await die.textContent())?.match(/Success/)) {
+    await expect(turn.locator(".consequences")).toContainText("a loose hearthstone");
+  }
+});
+
+test("the table assistant's suggestion goes into the composer with one tap", async ({ page }) => {
+  await openDemo(page);
+  await page.getByRole("button", { name: "OOC", exact: true }).click();
+  await say(page, "what could I do here?");
+  const tryIt = page.getByRole("button", { name: /Try: I search the hearth/ });
+  await expect(tryIt).toBeVisible({ timeout: 30_000 });
+  await tryIt.click();
+  await expect(page.getByLabel("What do you do?")).toHaveValue("I search the hearth for a loose stone");
+});
+
 test("reconsidering a called-for check changes nothing", async ({ page }) => {
   await openDemo(page);
   await say(page, "Mira, let me in on it.");

@@ -30,6 +30,7 @@ from app.ai.roles import AIPlayerOut, BeliefProcessorOut, ClaimExtractorOut, NPC
 from app.ai.runner import ModelRunner, RunResult
 from app.config import Settings
 from app.domain import events as ev
+from app.domain.consequences import catalogue
 from app.engine import beliefs as rules
 from app.engine.actions import ActionRequest
 from app.engine.autonomy import gate as autonomy_gate
@@ -43,7 +44,7 @@ from app.engine.tactics import (
     hostiles,
     situation_unchanged,
 )
-from app.persistence.models import Actor, Belief, Fact, Scene
+from app.persistence.models import Actor, Belief, Entity, Fact, Scene
 from app.services.actions import ActionService, LoadedScene, StaleStateError
 from app.services.candidates import Candidate, build_candidates, candidates_text, slug
 from app.services.events import EventTransaction
@@ -97,10 +98,18 @@ class Happenings:
     speech_results: list[SpeechResult] = field(default_factory=list)
     # social attempts aimed at an actor this turn: actor id -> (label, convincing?, margin)
     social: dict[uuid.UUID, tuple[str, bool, int]] = field(default_factory=dict)
+    # the order the player named people in (play session 2: "the guards, Elara and Tomas" —
+    # the guards were asked first and should answer first)
+    address_order: list[uuid.UUID] = field(default_factory=list)
+    # what the player did toward someone without words ("approaches and introduces themselves")
+    gestures: dict[uuid.UUID, str] = field(default_factory=dict)
 
     def note_speech(self, r: SpeechResult, targets: list[uuid.UUID]) -> None:
         self.speech_results.append(r)
         self.addressed |= set(targets)
+        for t in targets:
+            if t not in self.address_order:
+                self.address_order.append(t)
         self.informed |= set(r.recipients)
         asked = set(r.recipients) & set(targets) if targets else set(r.recipients)
         for c in r.claims:
@@ -109,6 +118,12 @@ class Happenings:
             for eid in (c.subject_entity_id, c.object_entity_id):
                 if eid is not None:
                     self.claim_entities.add(eid)
+
+
+REFUSALS = {"refuse", "turn_hostile", "add_obstacle", "raise_alarm"}
+SELF_NAME_RE = re.compile(
+    r"\b((?i:my name is|my name's|name's|i am|i'm|call me|they call me))\s+([A-Z][a-z']+)"
+)
 
 
 @dataclass
@@ -139,6 +154,8 @@ class Applied:
     rejected: str | None = None
     claim_extractor_used: bool = False
     speech_result: SpeechResult | None = None
+    # what this actor made happen by its own say-so (DECISIONS 10d)
+    consequences: list[Any] = field(default_factory=list)
 
 
 class AIActorService:
@@ -214,17 +231,71 @@ class AIActorService:
                 scored.append((a, sc))
         # whoever the player addressed answers first (A9 slice: "Tomas, what do you make of
         # the captain?" spent both reactions on Mira and Renn, and Tomas never answered)
-        scored.sort(key=lambda x: (x[0].id not in hap.addressed, -x[1], str(x[0].id)))
+        order = {a: i for i, a in enumerate(hap.address_order)}
+        scored.sort(
+            key=lambda x: (
+                x[0].id not in hap.addressed,
+                x[0].id not in hap.social,
+                order.get(x[0].id, 99),
+                -x[1],
+                str(x[0].id),
+            )
+        )
         limit = turn.budget["visible_reactions"]
         if turn.degraded("reduce_visible_reactions_to_1"):
             limit = min(limit, 1)
         # being addressed earns a reply whatever the score (A9 slice: Tomas, asked by name,
         # scored below Mira and Renn and was never called)
-        visible = [(a, sc) for a, sc in scored if tier(sc) == "high" or a.id in hap.addressed][
-            :limit
-        ]
+        visible = [
+            (a, sc)
+            for a, sc in scored
+            if tier(sc) == "high" or a.id in hap.addressed or a.id in hap.social
+        ][:limit]
         silent = [(a, sc) for a, sc in scored if (a, sc) not in visible and tier(sc) != "low"]
         return visible, silent
+
+    async def _self_introduction(
+        self, h: CampaignHandle, actor_id: uuid.UUID, spoken: str, r: SpeechResult
+    ) -> None:
+        """Someone who says their own name ("I'm Hale", "Name's Brisk") is known by it to
+        everyone who heard (play session 2: the guards were promoted with names nobody could
+        learn)."""
+        m = SELF_NAME_RE.search(spoken)
+        if m is None:
+            return
+        actor = await self.session.get(Actor, actor_id)
+        ent = await self.session.get(Entity, actor.entity_id) if actor else None
+        if ent is None or not ent.canonical_name:
+            return
+        said = m.group(2).strip().lower()
+        parts = [p for p in re.findall(r"[a-z']+", ent.canonical_name.lower()) if len(p) > 2]
+        if said not in parts:
+            return
+        async with self._tx(h, actor_id) as tx:
+            for listener in r.recipients:
+                if listener != actor_id:
+                    await self.knowledge.learn_identity(
+                        h, listener, ent.id, ent.canonical_name, tx=tx, cause=r.event
+                    )
+
+    async def _names_for(self, focus_actor_id: uuid.UUID | None) -> dict[uuid.UUID, str]:
+        """People as the player knows them, for consequence text the player reads."""
+        if focus_actor_id is None:
+            return {}
+        view = await self.perspective.scene_view(focus_actor_id)
+        return {p.actor_id: p.known_as for p in (view.participants if view else []) if p.actor_id}
+
+    async def _situation_lines(self, actor_id: uuid.UUID, cands: list[Candidate]) -> str:
+        """The recorded situations this actor perceives, with refs it may cite."""
+        from app.services.situations import SituationService
+
+        sits = await SituationService(self.session).visible_to(actor_id)
+        if not sits:
+            return ""
+        names = {uuid.UUID(c.id): c.known_as for c in cands if c.kind == "actor" and c.id}
+        names[actor_id] = "you"
+        lines = await SituationService(self.session).lines(sits, names)
+        return "\n\nSituation (recorded, true right now):\n- " + "\n- ".join(lines)
 
     # -- deciding --------------------------------------------------------------------------------
 
@@ -257,10 +328,12 @@ class AIActorService:
                 self.role_for(a),
                 actor_id=a.id,
                 purpose=f"{kind} decision",
-                situation=situations[a.id],
+                situation=situations[a.id] + await self._situation_lines(a.id, cands),
                 extra_sections={
                     "candidates": candidates_text(cands),
                     "available_actions": available,
+                    "rules_public": "What you can make happen by your own say-so "
+                    "(consequences; kind: what it does (params)):\n" + catalogue(for_actor=True),
                 },
                 now_tick=scene.local_tick,
             )
@@ -314,6 +387,9 @@ class AIActorService:
         d: Decision,
         turn: Turn,
         emit=None,
+        *,
+        focus_actor_id: uuid.UUID | None = None,
+        must_concede: bool = False,
     ) -> Applied:
         emit = emit or (lambda name, payload: None)
         applied = Applied(d.actor_id, d.kind)
@@ -363,6 +439,7 @@ class AIActorService:
                 return applied  # the whole proposal is rejected; nothing else is applied
             applied.spoke = True
             applied.speech_result = r
+            await self._self_introduction(h, d.actor_id, spoken, r)
             applied.speech = {
                 "actor_id": str(d.actor_id),
                 "channel": channel,
@@ -386,10 +463,15 @@ class AIActorService:
                 if ctx_in_combat(scene):
                     applied.notes.append("travel ignored during combat")
                     continue
+                from app.services.situations import SituationService
+
+                # an agreed escort: the party goes along (DECISIONS 10e; play session 3: the
+                # merchant agreed, then drove off alone)
+                linked = await SituationService(self.session).linked_party(d.actor_id)
                 try:
                     tr = await self.scenes.travel(
                         h,
-                        [d.actor_id],
+                        [d.actor_id, *linked],
                         uuid.UUID(tcand.id),
                         created_by_type="ai",
                         created_by_id=d.actor_id,
@@ -411,6 +493,8 @@ class AIActorService:
                         "status": "succeeded",
                         "scene_id": str(tr.scene.id),
                         "private": it.private,
+                        "with": [str(x) for x in linked],
+                        "to": tcand.known_as,
                     }
                 )
                 emit("reaction", {"actor_id": str(d.actor_id), "travel": tcand.known_as})
@@ -459,6 +543,41 @@ class AIActorService:
         )
         if has_state:
             await self._apply_state(h, d, out, by_ref, applied, goal_updates)
+
+        # 3b. consequences of the actor's own say-so (lets someone pass, promises, introduces
+        # itself…), validated: only about itself or obstacles it holds (DECISIONS 10d)
+        props = list(getattr(out, "consequences", []) or [])
+        if must_concede:
+            # a convincing appeal is not answered with a flat refusal (DECISIONS 10e)
+            dropped = [p for p in props if str(p.get("kind", "")).lower() in REFUSALS]
+            props = [p for p in props if p not in dropped]
+            applied.notes += [
+                f"consequence {p.get('kind')} dropped: they were won over" for p in dropped
+            ]
+        fresh_scene = await self.session.get(Scene, scene.id)
+        if props and fresh_scene is not None and fresh_scene.status == "active":
+            from app.services.consequences import ConsequenceContext, ConsequenceService
+
+            svc = ConsequenceService(
+                self.session, self.engine, actions=self.actions, scenes=self.scenes
+            )
+            c = ConsequenceContext(
+                h,
+                fresh_scene,
+                d.actor_id,
+                d.actor_id,
+                d.cands,
+                "actor",
+                None,
+                turn.turn_id,
+                focus_actor_id=focus_actor_id,
+                names=await self._names_for(focus_actor_id),
+            )
+            applied.consequences = await svc.apply_all(c, props)
+            for x in applied.consequences:
+                applied.notes.append(
+                    f"consequence {x.kind}: " + ("applied" if x.ok else f"rejected ({x.reason})")
+                )
 
         # 4. fallback policy for later combat turns
         fp = getattr(out, "fallback_policy", None)

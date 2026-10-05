@@ -37,6 +37,7 @@ class ResourceEntry:
     name: str
     current: int
     max: int
+    tracked_as: str = "pool"  # pool (current/max) | count (coin)
 
 
 @dataclass
@@ -162,6 +163,7 @@ class SheetService:
                     d.name,
                     st.resources[k].current if k in st.resources else 0,
                     calc.resource_max(st, k).value,
+                    d.tracked_as,
                 )
                 for k, d in rs.resources.items()
             ],
