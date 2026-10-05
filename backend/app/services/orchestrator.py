@@ -137,6 +137,39 @@ class PlayResult:
     channel: str = "auto"
 
 
+def narration_outcomes(result: PlayResult) -> list[str]:
+    """The focus actor's own attempts as the narrator must render them: what succeeded, what
+    failed, what could not be attempted at all. Engine reasons are paraphrased, never shown
+    raw (the narrator never mentions rules internals)."""
+    out: list[str] = []
+    for a in result.actions:
+        what = str(a.get("action", "")).removeprefix("action.").replace("_", " ")
+        target = a.get("target")
+        label = f"{what} ({target})" if target else what
+        status = a.get("status")
+        if status == "succeeded":
+            out.append(f"{label}: succeeded")
+        elif status == "failed":
+            out.append(f"{label}: attempted and FAILED; it did not achieve its aim")
+        elif status in ("invalid", "rejected", "cancelled"):
+            reason = str(a.get("reason") or "").strip()
+            out.append(
+                f"{label}: did NOT happen (not possible right now"
+                + (f": {reason}" if reason else "")
+                + "); do not narrate it happening"
+            )
+        elif status:
+            out.append(f"{label}: {status}")
+    if not result.actions and any(
+        n.startswith("(OOC) ruling rejected") for n in result.mechanical_notices
+    ):
+        out.append(
+            "your attempt had no effect at all; describe only what you observe, never the attempt "
+            "succeeding or revealing anything"
+        )
+    return out
+
+
 class SessionOrchestrator:
     def __init__(
         self,
@@ -297,6 +330,13 @@ class SessionOrchestrator:
         if channel == "auto":
             channel = intent.channel
             result.channel = channel
+            if channel in ("say", "whisper") and intent.asserted_facts:
+                # interpreted as speech: what the character says becomes Claims, not canon
+                # assertions (A9 slice: "Tomas, we found Oric's ledger…" cost three rulings)
+                turn.notes.append(
+                    f"{len(intent.asserted_facts)} asserted fact(s) ignored in speech"
+                )
+                intent.asserted_facts = []
         if explicit_speech:
             # the text IS the utterance: what it says becomes Claims through conveys[], never
             # canon assertions or actions (player-authored-canon applies to deeds, not dialogue)
@@ -327,6 +367,7 @@ class SessionOrchestrator:
                 f"model requested clarification (ignored): {intent.clarification_question!r}"
             )
         resolved = self._resolve_targets(intent, candidates, text, forced_target)
+        turn.notes.extend(item["note"] for item in resolved if item.get("note"))
         for item in resolved:
             if item["ambiguous"]:
                 await self._raise_clarification(
@@ -337,6 +378,15 @@ class SessionOrchestrator:
         policy = (
             campaign.settings.get("player_canon_policy") if campaign else None
         ) or DEFAULT_POLICY
+        rulings_left = [1]  # one assertion ruling per turn (each is a full model call)
+
+        async def adjudicate_once(assertion):
+            if not rulings_left[0]:
+                turn.notes.append("assertion not adjudicated: one ruling per turn")
+                return None
+            rulings_left[0] -= 1
+            return await self._adjudicate_assertion(h, req.actor_id, assertion, turn)
+
         for a in intent.asserted_facts:
             outcome = await self.canon.handle(
                 h,
@@ -345,9 +395,7 @@ class SessionOrchestrator:
                 policy=policy,
                 scene_id=scene.id,
                 auto_accepts_so_far=int(scene.state.get("player_assertions_accepted", 0)),
-                adjudicate=lambda assertion: self._adjudicate_assertion(
-                    h, req.actor_id, assertion, turn
-                ),
+                adjudicate=adjudicate_once,
                 location_id=scene.location_id,
             )
             result.assertions.append(
@@ -622,6 +670,7 @@ class SessionOrchestrator:
             style=settings.get("narration_style"),
             short=turn.degraded("short_narrator_prompt"),
             compressed=compressed,
+            outcomes=narration_outcomes(result),
         )
         try:
             narration, _run = await self.narration.narrate(h, bundle, turn, emit)
@@ -736,6 +785,46 @@ class SessionOrchestrator:
         await self.session.commit()
         return turn.summary()
 
+    async def _reaction_situation(self, actor_id: uuid.UUID, hap: Happenings) -> str:
+        """How this actor was addressed and who else heard, from the actor's own perspective
+        (A9 slice: a whispered question reached Mira as "something happened", so she could not
+        tell it from a public one and evaded as if the captain were listening)."""
+        generic = (
+            "Something just happened in the scene that concerns you (see your observations "
+            "and heard dialogue). React as your character: speak, act, or do nothing."
+        )
+        view = await self.perspective.scene_view(actor_id)
+        if view is None or not hap.speech_results:
+            return generic
+        by_actor = {str(p.actor_id): p.known_as for p in view.participants if p.actor_id}
+        lines: list[str] = []
+        for r in hap.speech_results:
+            pl = r.event.payload
+            if actor_id not in r.recipients:
+                continue
+            speaker = by_actor.get(str(pl.get("speaker_actor_id")), "someone")
+            heard = {str(x) for x in r.recipients} | {str(pl.get("speaker_actor_id"))}
+            others = [n for aid, n in by_actor.items() if aid not in heard and aid != str(actor_id)]
+            if pl.get("channel") == "whisper":
+                line = f"{speaker} just whispered to you; only you heard it."
+                if others:
+                    line += (
+                        f" Also present, and they did NOT hear it: {', '.join(others)}. "
+                        "Whisper back if they must not hear your answer."
+                    )
+            else:
+                line = f"{speaker} just spoke aloud."
+                if others:
+                    line += f" Everyone present heard it, including {', '.join(others)}."
+                line += " Anything you say aloud, they will hear too."
+            lines.append(line)
+        if not lines:
+            return generic
+        return (
+            " ".join(lines)
+            + " React as your character (see your heard dialogue): speak, act, or do nothing."
+        )
+
     async def _ai_reactions(
         self,
         h: CampaignHandle,
@@ -763,13 +852,7 @@ class SessionOrchestrator:
             while step is not None and step != "reduce_visible_reactions_to_1":
                 step = turn.degrade()
             visible = visible[:1]
-        situations = {
-            a.id: (
-                "Something just happened in the scene that concerns you (see your observations "
-                "and heard dialogue). React as your character: speak, act, or do nothing."
-            )
-            for a, _ in visible
-        }
+        situations = {a.id: await self._reaction_situation(a.id, hap) for a, _ in visible}
         decisions = await self.ai.decide_many(
             h,
             fresh,
@@ -915,10 +998,27 @@ class SessionOrchestrator:
         lower = text.lower()
         out = []
         for it in sorted(intent.intents, key=lambda i: i.order):
+            note: str | None = None
             if forced is not None:
                 cand = by_id.get(forced)  # the answered clarification names a candidate id
             else:
                 cand = match_ref(cands, it.target_ref)
+                # only a targeted intent is re-checked ("rest by the gate" has no target),
+                # and only against the kinds of thing that action can take (A9 slice: "attack
+                # the closest thief" matched a place by one word and Alex walked out of a fight)
+                kinds = WORD_MATCH_KINDS.get(ACTION_MAP.get(it.action_type.lower()) or "")
+                if not kinds and it.action_type.lower() in READ_TYPES:
+                    kinds = ("item",)
+                better = (
+                    closer_to_words(cands, cand, text, kinds=kinds)
+                    if it.target_ref and kinds
+                    else None
+                )
+                if better is not None:
+                    note = (
+                        f"target {it.target_ref!r} -> {better.ref}: the player's words describe it"
+                    )
+                    cand = better
             kind = it.action_type.lower()
             needs_actor = (
                 ACTION_MAP.get(kind) in ("action.attack", "action.engage")
@@ -947,6 +1047,9 @@ class SessionOrchestrator:
                     "ambiguous": amb,
                     "options": options,
                     "kind": "actor" if needs_actor else "target",
+                    "note": note,
+                    "targets": list(intent.targets or []),
+                    "text": text,
                 }
             )
         return out
@@ -1085,6 +1188,19 @@ class SessionOrchestrator:
             return await self._travel(h, req, scene, step, cands, turn, result, emit)
         if kind in READ_TYPES and cand is not None and cand.kind == "item":
             return await self._read(h, req, cand, turn, result, emit)
+        if kind in READ_TYPES:
+            # nothing readable in reach by that description: an invalid action, not a ruling
+            # (A9 slice: unmatched reads went to the Rules Adjudicator, whose ruling invented
+            # fields, was rejected, and cost a model call for nothing)
+            entry = {
+                "action": "read",
+                "target": step["intent"].target_ref,
+                "status": "invalid",
+                "reason": "there is nothing like that within reach to read",
+            }
+            result.actions.append(entry)
+            result.mechanical_notices.append(f"(OOC) {entry['reason']}")
+            return None
         if action_key is not None:
             if (
                 action_key in ("action.move", "action.sprint")
@@ -1187,6 +1303,42 @@ class SessionOrchestrator:
         emit("mechanics", {"action": entry, "events": ["document.read"]})
         return None
 
+    async def _party_ids(self, actor_id: uuid.UUID) -> set[uuid.UUID]:
+        from app.persistence.models import PartyMembership
+
+        parties = select(PartyMembership.party_id).where(PartyMembership.actor_id == actor_id)
+        return set(
+            (
+                await self.session.execute(
+                    select(PartyMembership.actor_id).where(PartyMembership.party_id.in_(parties))
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    async def _companions_in_words(
+        self, actor_id: uuid.UUID, cands: list[Candidate], text: str
+    ) -> list[uuid.UUID]:
+        """Who the player's own words take along (A9 slice: "We head to the Red Lantern, all
+        three of us" moved only Alex). Party members named in the text come; "we", "us",
+        "together" or "all of us" with nobody named brings every party member present. Only
+        party members ever follow (the caller filters)."""
+        low = text.lower()
+        present = [c for c in cands if c.kind == "actor" and c.id and c.id != str(actor_id)]
+        named = [
+            uuid.UUID(c.id)
+            for c in present
+            if _tokens(c.known_as) and _tokens(c.known_as) <= set(re.findall(r"[a-z0-9]+", low))
+        ]
+        group = re.search(r"\b(we|us|together|all of us|all (two|three|four|five) of us)\b", low)
+        with_me = re.search(r"\b(and i|with me|come with|follow me)\b", low)
+        if named and (group or with_me):
+            return named
+        if group:
+            return [uuid.UUID(c.id) for c in present]
+        return []
+
     async def _travel(
         self,
         h: CampaignHandle,
@@ -1211,7 +1363,15 @@ class SessionOrchestrator:
             c = match_ref(cands, r) if r not in by_ref else by_ref[r]
             if c is not None and c.kind == "actor" and c.id:
                 companions.append(uuid.UUID(c.id))
-        companions = [a for a in companions if a != req.actor_id]
+        for r in step.get("targets", []):  # GLM names companions here, not in params.with
+            c = match_ref(cands, r) if r not in by_ref else by_ref[r]
+            if c is not None and c.kind == "actor" and c.id:
+                companions.append(uuid.UUID(c.id))
+        companions += await self._companions_in_words(req.actor_id, cands, step.get("text", ""))
+        party = await self._party_ids(req.actor_id)
+        companions = list(dict.fromkeys(a for a in companions if a != req.actor_id and a in party))
+        if companions:
+            turn.notes.append(f"travelling with {len(companions)} companion(s)")
         try:
             tr = await self.scenes.travel(
                 h,
@@ -1566,6 +1726,52 @@ def _looks_like_uuid(v: str) -> bool:
 
 def _tokens(name: str) -> set[str]:
     return {t for t in re.findall(r"[a-z0-9]+", name.lower()) if t not in STOP and len(t) > 2}
+
+
+# which kinds of candidate the player's words may pick for an action (none: never)
+WORD_MATCH_KINDS: dict[str, tuple[str, ...]] = {
+    "action.move": ("location", "zone"),
+    "action.sprint": ("location", "zone"),
+    "travel": ("location",),
+    "action.search": ("zone", "item"),
+    "action.pick_up": ("item",),
+    "action.drop": ("item",),
+    "action.use_item": ("item",),
+    "action.take_cover": ("zone",),
+}
+
+
+def closer_to_words(
+    cands: list[Candidate],
+    picked: Candidate | None,
+    text: str,
+    *,
+    kinds: tuple[str, ...] = ("location", "item", "zone"),
+) -> Candidate | None:
+    """The player's own words outrank the model's pick (A9 slice: "the shuttered warehouse with
+    the merchant sign" was resolved to "Warehouse District"; "the notice on the gatepost" was
+    given a ref that matched nothing; "the ledger" for "Oric's private ledger"). Another
+    place/item/zone wins when it shares at least two more significant words with the input
+    than the pick does; with no pick at all, one shared word is enough. Either way no other
+    candidate may tie it; otherwise the pick stands."""
+    if picked is not None and picked.kind not in kinds:
+        return None
+    words = _tokens(text)
+    if not words:
+        return None
+
+    def score(c: Candidate) -> int:
+        return len(_tokens(c.known_as) & words)
+
+    base = score(picked) if picked is not None else 0
+    pool = [c for c in cands if c.kind in ((picked.kind,) if picked else kinds) and c is not picked]
+    scored = sorted(((score(c), c) for c in pool), key=lambda x: -x[0])
+    need = base + 2 if picked is not None else 1
+    if not scored or scored[0][0] < need:
+        return None
+    if len(scored) > 1 and scored[1][0] == scored[0][0]:
+        return None
+    return scored[0][1]
 
 
 def match_ref(cands: list[Candidate], ref: str | None) -> Candidate | None:

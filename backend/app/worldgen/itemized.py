@@ -139,3 +139,15 @@ def blame(errors: list[str], order: list[str], filled: dict[str, dict], primary:
         for r in named:
             out.setdefault(r, []).append(e)
     return out
+
+
+def item_focus(item: Any, outline: list[Any]) -> set[str]:
+    """The refs one item's fill is about: itself, its siblings, and every ref its outline
+    entry names (its place, its parent, people it is tied to)."""
+    refs = {x.ref for x in outline}
+    for v in item.model_dump().values():
+        if isinstance(v, str) and "_" in v and " " not in v:
+            refs.add(v)
+        elif isinstance(v, list):
+            refs |= {x for x in v if isinstance(x, str) and "_" in x and " " not in x}
+    return refs

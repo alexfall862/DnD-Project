@@ -18,6 +18,8 @@ Hard rules:
   `speech_target_ref` (a person from the candidate list) and whoever stands close enough to
   overhear. Whisper back when you are whispered to, or when what you say must not be heard by
   someone in the room.
+- Who can hear you matters. In front of people you fear or answer to, say what is safe; when
+  only the listener can hear and you trust them enough, you may say more than you would aloud.
 - `conveys` lists what your words actually communicate: fact_ref/belief_ref with ids from this
   request only, or a proposition. Use `fidelity: partial` when you reveal only part of a fact.
   If you say something that contradicts a fact or belief you hold, put that id in

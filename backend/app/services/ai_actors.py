@@ -210,11 +210,17 @@ class AIActorService:
             sc = significance(s)
             if sc > 0:
                 scored.append((a, sc))
-        scored.sort(key=lambda x: (-x[1], str(x[0].id)))
+        # whoever the player addressed answers first (A9 slice: "Tomas, what do you make of
+        # the captain?" spent both reactions on Mira and Renn, and Tomas never answered)
+        scored.sort(key=lambda x: (x[0].id not in hap.addressed, -x[1], str(x[0].id)))
         limit = turn.budget["visible_reactions"]
         if turn.degraded("reduce_visible_reactions_to_1"):
             limit = min(limit, 1)
-        visible = [(a, sc) for a, sc in scored if tier(sc) == "high"][:limit]
+        # being addressed earns a reply whatever the score (A9 slice: Tomas, asked by name,
+        # scored below Mira and Renn and was never called)
+        visible = [(a, sc) for a, sc in scored if tier(sc) == "high" or a.id in hap.addressed][
+            :limit
+        ]
         silent = [(a, sc) for a, sc in scored if (a, sc) not in visible and tier(sc) != "low"]
         return visible, silent
 
@@ -724,7 +730,63 @@ class AIActorService:
                 items += extracted
             else:
                 notes.append("claim extractor yielded nothing")
+        notes += await self._detect_lies(d, items, names)
         return items, notes
+
+    async def _detect_lies(
+        self, d: Decision, items: list[ConveysItem], names: dict[uuid.UUID, str]
+    ) -> list[str]:
+        """Engine-side deception (A9 slice: Renn said "Been years since I've had business
+        with him" and the model did not mark it). A denial is deliberate when the speaker
+        holds, as fact or firm belief, a positive record about the same people: all the
+        entities the denial names appear in the record, and with only one entity named the
+        wording overlaps too. The flag stays speaker-private; it never changes what listeners
+        believe, only how the claim is recorded."""
+        notes: list[str] = []
+        records: list[tuple[str, set[str], set[str]]] = []
+        for short, rid in d.ref_map.items():
+            if short.startswith("f_"):
+                kind = "fact_ref"
+                fact = await self.session.get(Fact, rid)
+                raw = KnowledgeService.proposition_of(fact).predicate if fact else ""
+            elif short.startswith("b_"):
+                b = await self.perspective.repo.holds_belief(d.actor_id, rid)
+                if b is None or (b.belief_type != "known" and float(b.confidence) < 0.8):
+                    continue  # a suspicion denied is not a lie
+                kind = "belief_ref"
+                raw = str((b.proposition or {}).get("predicate") or "")
+            else:
+                continue
+            rec = await self._record_terms(d.actor_id, kind, rid, names)
+            if rec is None:
+                continue
+            pred, _names, ref_ids = rec
+            if _is_negative(raw):
+                continue  # the record itself is a negative: denying it agrees with it
+            records.append((short, pred, ref_ids))
+        for it in items:
+            if it.deliberate_false or it.stance == "question" or it.proposition is None:
+                continue
+            predicate = str(it.proposition.get("predicate") or "")
+            negative = it.stance == "asserts_false" or _is_negative(predicate)
+            if not negative:
+                continue
+            ents = {
+                str(x)
+                for x in (
+                    it.proposition.get("subject_entity_id"),
+                    it.proposition.get("object_entity_id"),
+                )
+                if x and _is_uuid(str(x))
+            }
+            if not ents:
+                continue
+            for short, pred, ref_ids in records:
+                if ents <= ref_ids and (len(ents) >= 2 or pred & _terms(predicate)):
+                    it.deliberate_false = True
+                    notes.append(f"engine: denial {predicate!r} contradicts held {short}")
+                    break
+        return notes
 
     async def _self_entity(self, actor_id: uuid.UUID) -> uuid.UUID | None:
         a = await self.perspective.repo.actor(actor_id)
@@ -1183,6 +1245,34 @@ class AIActorService:
 def ctx_in_combat(scene: Scene) -> bool:
     enc = scene.state.get("encounter") or {}
     return enc.get("status") == "active"
+
+
+NEGATIONS = {
+    "not",
+    "never",
+    "nothing",
+    "none",
+    "nobody",
+    "haven",
+    "hasn",
+    "didn",
+    "don",
+    "doesn",
+    "isn",
+    "wasn",
+    "weren",
+    "aren",
+    "won",
+    "cannot",
+    "neither",
+    "nor",
+    "without",
+}
+
+
+def _is_negative(text: str) -> bool:
+    t = text.lower()
+    return "n't" in t or bool(set(re.findall(r"[a-z]+", t)) & (NEGATIONS | {"no"}))
 
 
 def _terms(text: str) -> set[str]:

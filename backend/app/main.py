@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -69,7 +70,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     install_error_handling(app)
     app.include_router(api_v1_router)
+    mount_frontend(app)
     return app
+
+
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+
+def mount_frontend(app: FastAPI, dist: Path = FRONTEND_DIST) -> None:
+    """Serve the built browser client (Milestone 10) from the API's own port when
+    `frontend/dist` exists, so a phone on the network opens one address. Unknown non-API paths
+    fall back to index.html (the client routes by URL hash). `npm run dev` is used instead
+    while developing the UI."""
+    index = dist / "index.html"
+    if not index.is_file():
+        return
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    async def spa(path: str) -> FileResponse:
+        if path.startswith("api/"):
+            from app.api.errors import NotFound
+
+            raise NotFound("no such API route")
+        candidate = (dist / path).resolve()
+        if path and candidate.is_file() and dist.resolve() in candidate.parents:
+            return FileResponse(candidate)
+        return FileResponse(index)
 
 
 app = create_app()

@@ -14,3 +14,9 @@ from the fictional circumstances (never from the desired dramatic result), and e
 compositions for success and failure using ONLY the listed effect primitives and definitions.
 Prefer existing rules and precedents; use the fewest new assumptions. Do not roll dice and do
 not mutate state. Default scope is single_use. Keep the summary to one sentence.
+
+Every effect step is exactly `{"type": <primitive>, "params": {...}}`: no other keys
+(no `target`, `information`, `description`). Put any target or detail inside `params`,
+using only the parameters that primitive reads. Information, knowledge and documents are
+not effects: if the attempt is only to learn or read something, rule `requires_check:
+false` with empty effects; the engine handles what is learned.

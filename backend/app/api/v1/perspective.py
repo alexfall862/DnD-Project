@@ -24,6 +24,7 @@ class ParticipantOut(BaseModel):
     is_self: bool
     visible_conditions: list[str]
     zone: str | None = None
+    actor_id: uuid.UUID | None = None
 
 
 class SceneOut(BaseModel):

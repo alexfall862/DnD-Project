@@ -600,6 +600,15 @@ class CampaignStarted(EventPayload):
     player_actor_id: uuid.UUID | None = None
 
 
+class SettingsChanged(EventPayload):
+    """A player-facing tunable changed (api-contracts §5 PATCH; design-iteration §5). Settings
+    never rewrite world truth; the event records what changed and from what."""
+
+    event_type: ClassVar[str] = "settings.changed"
+    changes: dict[str, Any]
+    previous: dict[str, Any] = Field(default_factory=dict)
+
+
 class SimulationRunCompleted(EventPayload):
     """One bounded world-simulation run (world-memory §23): interval, candidates, budget."""
 
@@ -697,6 +706,7 @@ PAYLOAD_TYPES: dict[str, type[EventPayload]] = {
         FactionMemberJoined,
         LocationMaterialized,
         CampaignStarted,
+        SettingsChanged,
     )
 }
 

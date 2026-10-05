@@ -123,6 +123,44 @@ class Catalog:
     def truth_keys(self) -> set[str]:
         return {k for m in self.mysteries.values() for k in m.truth_fact_keys}
 
+    def relevant_lines(
+        self, stages: set[str], focus: set[str] | None = None, *, max_facts: int = 80
+    ) -> list[str]:
+        """The canon one generation call needs (09c: late prompts carried the whole catalog,
+        13–15k tokens). Every ref stays listed, compactly, so references resolve; facts are
+        shown from `stages` (plus the premise and any import) and wherever they mention a
+        `focus` ref; the rest are counted, not shown. Validation still checks against the
+        whole catalog, so a filtered prompt cannot let a contradiction through."""
+        focus = focus or set()
+        by_kind: dict[str, list[str]] = {}
+        for ref, kind in self.kinds.items():
+            name = (self.names.get(ref) or "")[:48]
+            by_kind.setdefault(kind, []).append(f"{ref} ({name})" if name and name != ref else ref)
+        out = [f"{kind}s: " + "; ".join(refs) for kind, refs in by_kind.items()]
+        wanted = stages | {"premise", "import"}
+        near, staged, hidden = [], [], 0
+        for key, f in self.facts.items():
+            mentions = {f.subject_ref, f.object_ref, *f.known_by_refs} & focus
+            line = (
+                f"fact {key} ({f.canon}, {f.sensitivity}): "
+                f"{f.subject_ref or '-'} {f.predicate} {f.object_ref or ''} {f.value or ''}".strip()
+            )
+            if mentions or key in focus:
+                near.append(line)
+            elif self.fact_stage.get(key) in wanted:
+                staged.append(line)
+            else:
+                hidden += 1
+        shown = (near + staged)[:max_facts]
+        hidden += len(near) + len(staged) - len(shown)
+        out += shown
+        if hidden:
+            out.append(
+                f"({hidden} further facts from other stages exist and are stored; do not "
+                "restate or contradict canon you were not shown; refer to things by ref)"
+            )
+        return out
+
     def summary_lines(self, *, include_secrets: bool = True) -> list[str]:
         out = []
         for ref, kind in self.kinds.items():

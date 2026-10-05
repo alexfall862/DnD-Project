@@ -636,6 +636,131 @@ Milestone 11 (stress) with per-actor partitioning or iterative index scans if ne
   Generated schedules never land before the current clock, so day 0 means "as play
   begins". The settlement reachability check follows routes and containment transitively.
 
+### Generation canon filter (09d) — implementation decision (2026-10-04)
+
+- **Each World Author call sees only the canon it needs** (`Catalog.relevant_lines`). Every
+  ref stays listed, compactly, one line per kind, so references resolve. Facts are shown from
+  the stage's direct dependencies, the premise and any import, and wherever they mention the
+  call's focus refs. For an item fill, the focus is the item, its siblings and the refs its
+  outline entry names. Facts from other stages are counted ("N further facts … do not restate
+  or contradict"), not shown. Validation still checks against the whole catalog, so a
+  filtered prompt cannot let a contradiction through. On the Saltreach fixture the late-stage
+  canon section roughly halves; the A9 world has more facts per stage.
+
+### Player UI (10) — implementation decisions (2026-10-04)
+
+- **Stack: Vite + React + TypeScript single-page app, not Next.js.** The plan named Next.js.
+  Nothing here needs server rendering: every view is an authenticated-by-perspective API
+  read, play streams over SSE from the browser, and the app must run on a phone over the
+  LAN/tailnet. A static SPA is smaller (≈ 60 kB gzipped), is served by FastAPI from
+  `frontend/dist` on the API's own port (`mount_frontend`; unknown non-API paths fall back
+  to `index.html`, API 404s stay JSON), and needs no Node server in production. Plain CSS
+  with design tokens; no component library; inline icons.
+- **One layout, three widths.** At ≥ 1180 px: nav rail with party, feed, character panel. At
+  720–1180 px: icon rail and feed. Below 720 px: feed and composer over a bottom tab bar, with
+  the rest under More. Touch targets are ≥ 40 px, safe-area insets are respected, and the
+  composer uses 16 px text so iOS does not zoom.
+- **Developer visibility is a per-browser toggle, gated by the server.** The DEV switch exists
+  only when `GET /campaigns/{id}` reports `debug_mode`. It is stored in localStorage and can
+  be flipped mid-play. It adds per-turn latency/call chips, an inline turn **Trace** and a
+  **Debug** view. All developer material is shown in a separate violet hue. Normal view
+  calls only perspective-safe endpoints; omniscient data is fetched only in dev view and only
+  from `/debug`. Turning dev off leaves the Debug view.
+- **New perspective-safe endpoints:**
+  - `GET /campaigns` and `GET /campaigns/{id}`: metadata, world time, player settings,
+    `debug_mode`, and the human-controlled actors only.
+  - `PATCH /campaigns/{id}/settings`: only `narration_style`, `spotlight`, `spectator_mode`,
+    `latency_budget` and `player_canon_policy`, each change a `settings.changed` event.
+  - `GET /characters/{id}/sheet`: the focus actor's own sheet; anyone else gets 403.
+  - `GET /campaigns/{id}/party?actor_id=`: members as the focus actor knows them. Members
+    in the same scene show visible conditions and a coarse wound state (unhurt, hurt, badly
+    hurt or down), because resources are owner-visible. Members elsewhere are "away" with
+    nothing else.
+  - Scene participants now carry `actor_id`, so speaker lines can be labelled by known
+    name. Ids grant nothing.
+- **Debug turn trace** (`GET /debug/turns/{turn_id}`) joins one turn's metrics, intents,
+  actions, resolution traces, rolls (hidden ones marked `hidden_in_production`), transcript
+  lines, model runs and the event window those rows span.
+- **The feed is cached per browser** (finished turns, per campaign and focus actor, capped at
+  120). The server remains authoritative; a server transcript endpoint for the focus actor is
+  backlog.
+- **Browser tests use the real API with scripted fakes.** `backend/tests/e2e_server.py` serves
+  the app on the test database with `DEBUG_MODE` on and a FakeModelProvider scripted for the
+  Red Lantern scene (:8001) or the whole vertical slice (`E2E_FIXTURE=frostbridge`, :8002).
+  Playwright runs desktop and phone projects plus the full Frostbridge scenario through the
+  UI. Only combat staging stays in the backend slice test.
+
+### Real-model runs of the Frostbridge slice and the World Simulator (10) — 2026-10-04
+
+- **World Simulator on A9:** one call (≈ 5 s, 961 + 65 tokens), a valid `plan_advance`
+  proposal applied, the shipment departed on schedule, and the run is on the ledger. No
+  change needed.
+- **Slice on A9: the safety invariants held.** No speaker conveyed a fact it does not hold, no
+  leakage incident occurred, the party never held the hidden truth, and the objective truth
+  was untouched. The run also found four problems:
+  1. **Narration contradicted resolution.** The narrator received only the player's words, so
+     an invalid pick-up and a rejected read were narrated as successes. It now receives each
+     attempt's authoritative outcome (`narration_outcomes`: succeeded, FAILED, or did NOT
+     happen, with engine reasons paraphrased), and the narrator prompt makes those lines
+     binding. `narration_style` also accepts the presets `terse`, `standard` and `rich`
+     (the UI's setting crashed the bundle builder, which expected a dict).
+  2. **Loose targets.** GLM resolved "the shuttered warehouse with the merchant sign" to the
+     district, and "the notice on the gatepost" to a ref that matched nothing. The engine now
+     lets the player's own words outrank the model's pick (`closer_to_words`). A place, item
+     or zone wins when it shares two more significant words with the input than the pick
+     does, and no other candidate ties it; the switch is noted on the turn.
+  3. **Rejected rulings.** An unmatched read fell to the Rules Adjudicator, whose ruling used
+     fields the schema forbids. It was rejected (correctly) and is now narrated as "no effect".
+     The adjudicator prompt itself is backlog.
+  4. **Renn's lie was not flagged as deliberate.** "Been years since I've had business with
+     him" is false, but `deliberate_false` was not set. This is backlog: NPC Actor prompt or
+     engine-side detection against the speaker's own beliefs.
+  The eval's own whisper turns were wrong (`/whisper` sent as text, so the target was
+  inferred) and now use the API's channel and targets.
+  The word match runs only for intents that name a target ("rest by the gate" has none). With
+  no model match, one shared word is enough when no other candidate ties ("the ledger" →
+  "Oric's private ledger"). The second run read the notice, reached the right warehouse, found
+  the ledger and the satchel, narrated a failed pick-up as failing, and finished combat in two
+  rounds (`docs/spikes/frostbridge-a9-2026-10-04.md`).
+- **Browser tests are deterministic** because the e2e server seeds the dice (the slice's seed)
+  and allows one visible reaction per turn, as the slice does. Concurrent reactions would let
+  timing decide who acts first.
+
+### Milestone 10 follow-ups (10b) — implementation decisions (2026-10-04)
+
+- **A reacting character is told how it was addressed.** The reaction situation used to be a
+  generic "something just happened". It now says, from the actor's own scene view, that it was
+  whispered to or spoken to aloud, and who present did NOT hear. Mira had evaded a whispered
+  question as if the captain could hear it. The NPC Actor prompt adds that who can hear
+  matters.
+- **Deception is detected by the engine** (`_detect_lies`). A denial is flagged
+  `deliberate_false` when the speaker holds, as fact or firm belief (`known`, or confidence of
+  at least 0.8), a positive record about the same entities. With a single entity, the wording
+  must overlap too. A denied suspicion is not a lie. The flag stays speaker-private.
+- **An unmatched read is an invalid action**, decided by the engine without a model call. The
+  adjudicator prompt spells out the effect-step shape (`type` and `params` only) and says
+  information is not an effect.
+- **Fewer and better-aimed model calls per turn:**
+  - Dialogue is never player canon, whether the player or the interpreter chose the speech
+    channel.
+  - At most one assertion ruling per turn.
+  - Whoever the player addressed always gets a reaction, regardless of significance score.
+- **Word matching respects the action.** The player's words pick only kinds of thing the
+  action can take: places for movement, items for reading or picking up, zones or items for
+  searching, never targets for attacks. Run 3 had walked Alex out of a fight to a place
+  sharing one word.
+- **Companions come along by the player's words.** Party members named with "and I" or "with
+  me" come along. "We", "us", "together" and "all of us" bring every party member present, as
+  do the interpreter's top-level targets. Only party members ever follow. In run 4 only Alex
+  moved, so Tomas could not answer a question asked of him.
+- **The play feed lives on the server** (`player_turns`, migration 0016;
+  `GET /characters/{id}/feed`). Each completed turn is stored as the API returned it to that
+  player. It is presentation, like `turn_metrics`, so it is written without an Event and
+  served only to the same focus actor. Any device shows the same history; localStorage keeps
+  only the theme and the DEV switch.
+- **Eval fix:** the slice's "conveyed a fact not held" check skips document claims, since a
+  read document speaks for its author (Oric's ledger).
+
 ### Pending
 - **2026-10-03, later:** A9 was updated after the spike. The project now serves **GLM-4.5-Air**
   as `ttrpg/local-general` (explicit model name; A9 never substitutes; 409 = not loaded, wait

@@ -76,3 +76,24 @@ def test_blame_sends_back_named_items_and_spreads_shortfalls() -> None:
     assert list(out) == ["opp_a"] and "add clues for this item" in out["opp_a"][0]
     # a shortfall of the items themselves can only be fixed by a new outline
     assert blame(["stage npcs needs at least 3 actors"], ["npc_a"], {}, "actors") == {}
+
+
+def test_the_canon_shown_to_a_call_is_filtered_but_every_ref_stays() -> None:
+    from app.worldgen.envelope import GenFact
+
+    cat = Catalog()
+    cat.add("premise", WorldAuthorOut(facts=[GenFact(key="f_premise", predicate="p")]))
+    cat.add("history", WorldAuthorOut(facts=[GenFact(key="f_old_war", predicate="a war")]))
+    cat.add(
+        "npcs",
+        WorldAuthorOut(
+            actors=[GenActor(ref="npc_a", name="A")],
+            facts=[GenFact(key="f_a", predicate="owes", subject_ref="npc_a")],
+        ),
+    )
+    text = "\n".join(cat.relevant_lines({"opening"}))
+    assert "npc_a (A)" in text  # refs always resolve
+    assert "f_premise" in text and "f_old_war" not in text and "f_a" not in text
+    assert "2 further facts" in text
+    focused = "\n".join(cat.relevant_lines({"opening"}, {"npc_a"}))
+    assert "f_a" in focused and "f_old_war" not in focused  # facts about the focus are shown

@@ -39,6 +39,7 @@ class VisibleParticipant:
     is_self: bool
     visible_conditions: list[str] = field(default_factory=list)
     zone: str | None = None
+    actor_id: uuid.UUID | None = None  # lets a client label speaker lines by known name
 
 
 @dataclass
@@ -111,6 +112,7 @@ class PerspectiveService:
                     is_self=is_self,
                     visible_conditions=sorted(k for k in c if k in VISIBLE_CONDITIONS),
                     zone=(positions.get(str(a.id)) or {}).get("zone"),
+                    actor_id=a.id,
                 )
             )
         location_name = None

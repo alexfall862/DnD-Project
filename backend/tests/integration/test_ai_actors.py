@@ -1077,3 +1077,207 @@ async def test_assertion_refs_need_the_predicate_denials_need_only_the_names(
         .all()
     )
     assert all(c.source_fact_id != w.facts["renn_met_oric"] for c in mira_claims)
+
+
+async def test_an_unmarked_denial_of_a_held_fact_is_flagged_by_the_engine(
+    session: AsyncSession, frostbridge: World
+) -> None:
+    """A9 slice (Milestone 10 run): Renn denied meeting Oric but the model marked neither
+    `contradicts_ref` nor a lie. The engine flags the claim from Renn's own records; listeners
+    are unaffected (the flag is speaker-private)."""
+    w = frostbridge
+    fake = FakeModelProvider()
+    fake.register(
+        "intent_interpreter",
+        responder(
+            {
+                "last speak": intent(
+                    "say",
+                    intents=[("ask", "a_man_you_have_not_met", None)],
+                    conveys=[
+                        {
+                            "kind": "proposition",
+                            "proposition": {
+                                "subject_entity_id": "a_man_you_have_not_met",
+                                "predicate": "last spoke to Oric when",
+                            },
+                            "stance": "question",
+                        }
+                    ],
+                    band="brief",
+                )
+            }
+        ),
+    )
+    fake.register(
+        "npc_actor",
+        by_actor(
+            {
+                "Renn": npc(
+                    "Haven't met privately with Oric Dane in years.",
+                    conveys=[
+                        {
+                            "kind": "proposition",
+                            "proposition": {
+                                "subject_entity_id": "oric_dane",
+                                "predicate": "has not met privately with the captain",
+                            },
+                            "stance": "asserts_true",
+                        }
+                    ],
+                    act="answer",  # the model does not admit the lie
+                ),
+                "Mira": npc(None, act="silence"),
+            }
+        ),
+    )
+    orch = make(session, fake)
+    await w.knowledge.learn_identity(w.h, w.actors["Renn"], w.entities["Oric"], "Oric Dane")
+    await orch.process_player_input(
+        w.h,
+        PlayRequest(
+            w.actors["Alex"], 'I ask the stranger at the door "when did you last speak to Oric?"'
+        ),
+    )
+    claims = (
+        (await session.execute(select(Claim).where(Claim.speaker_actor_id == w.actors["Renn"])))
+        .scalars()
+        .all()
+    )
+    assert claims and claims[0].deliberate_false is True
+    # a plain, true-to-his-knowledge statement is not flagged
+    psv = PerspectiveService(session)
+    heard = [h for h in await psv.heard_claims(w.actors["Alex"]) if h.claim_id == claims[0].id]
+    assert heard and not hasattr(heard[0], "deliberate_false")
+
+
+async def test_reading_something_not_in_reach_is_invalid_without_a_ruling(
+    session: AsyncSession, frostbridge: World
+) -> None:
+    """A9 slice (Milestone 10 run): a read whose target matched nothing went to the Rules
+    Adjudicator. It is now an invalid action, decided by the engine without a model call."""
+    w = frostbridge
+    fake = FakeModelProvider()
+    fake.register(
+        "intent_interpreter",
+        responder({"letter": intent("do", intents=[("read", "a_sealed_letter", None)])}),
+    )
+    fake.register(
+        "npc_actor", by_actor({"Mira": npc(None, act="silence"), "Renn": npc(None, act="silence")})
+    )
+    fake.register("ai_player", by_actor({"Elara": pc(None), "Tomas": pc(None)}))
+    orch = make(session, fake)
+    res = await orch.process_player_input(
+        w.h, PlayRequest(w.actors["Alex"], "I read the sealed letter.")
+    )
+    assert res.actions == [
+        {
+            "action": "read",
+            "target": "a_sealed_letter",
+            "status": "invalid",
+            "reason": "there is nothing like that within reach to read",
+        }
+    ]
+    assert "rules_adjudicator" not in res.metrics["calls_by_role"]
+
+
+async def test_an_addressed_companion_answers_first_and_dialogue_is_never_canon(
+    session: AsyncSession, frostbridge: World
+) -> None:
+    """A9 slice (Milestone 10 run): "Tomas, what do you make of the captain?" spent the
+    reaction budget on Mira and Renn, and an auto-channel line interpreted as speech had its
+    content adjudicated as player canon. The addressed character answers first, and speech is
+    Claims, never canon assertions."""
+    w = frostbridge
+    fake = FakeModelProvider()
+    fake.register(
+        "intent_interpreter",
+        responder(
+            {
+                "make of the captain": intent(
+                    "say",
+                    intents=[("ask", "tomas", None)],
+                    targets=["tomas"],
+                    asserted=[
+                        {
+                            "proposition": {"predicate": "the captain keeps odd hours"},
+                            "class": "world_minor",
+                            "mechanical_weight": "none",
+                        }
+                    ],
+                    band="brief",
+                )
+            }
+        ),
+    )
+    asked: list[str] = []
+
+    def actor(name):
+        def reply(req):
+            asked.append(name)
+            return pc("He's earned some trust.") if name == "Tomas" else npc(None, act="silence")
+
+        return reply
+
+    fake.register("npc_actor", by_actor({"Mira": actor("Mira"), "Renn": actor("Renn")}))
+    fake.register("ai_player", by_actor({"Tomas": actor("Tomas"), "Elara": actor("Elara")}))
+    orch = make(session, fake, spotlight_visible_reactions=1)
+    res = await orch.process_player_input(
+        w.h, PlayRequest(w.actors["Alex"], "Tomas, what do you make of the captain?")
+    )
+    assert asked == ["Tomas"]
+    assert res.assertions == []
+    assert "rules_adjudicator" not in res.metrics["calls_by_role"]
+
+
+async def test_a_whispered_question_tells_the_listener_who_did_not_hear(
+    session: AsyncSession, frostbridge: World
+) -> None:
+    """A9 slice (Milestone 10 run): Mira evaded a whispered question as if the captain could
+    hear it; her context only said "something happened". It now says how she was addressed and
+    who did not hear."""
+    w = frostbridge
+    fake = FakeModelProvider()
+    fake.register(
+        "intent_interpreter",
+        responder(
+            {
+                "between us": intent(
+                    "whisper",
+                    intents=[("whisper", "mira", None)],
+                    conveys=[
+                        {
+                            "kind": "proposition",
+                            "proposition": {
+                                "subject_entity_id": "oric",
+                                "predicate": "met someone before he vanished",
+                            },
+                            "stance": "question",
+                        }
+                    ],
+                    band="brief",
+                )
+            }
+        ),
+    )
+    seen: list[str] = []
+
+    def mira(req):
+        seen.append(req.user)
+        return npc("Not here.", act="evade")
+
+    fake.register("npc_actor", by_actor({"Mira": mira, "Renn": npc(None, act="silence")}))
+    fake.register("ai_player", by_actor({"Elara": pc(None), "Tomas": pc(None)}))
+    orch = make(session, fake)
+    await orch.process_player_input(
+        w.h,
+        PlayRequest(
+            w.actors["Alex"],
+            "Just between us: did he meet someone before he vanished?",
+            "whisper",
+            [w.actors["Mira"]],
+        ),
+    )
+    assert seen, "Mira was not asked"
+    assert "just whispered to you; only you heard it" in seen[0]
+    assert "did NOT hear it" in seen[0]

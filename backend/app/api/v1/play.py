@@ -113,7 +113,7 @@ async def _handle(
         raise UnauthorizedPerspectiveError(str(exc)) from exc
     except WorldError as exc:
         raise ApiError(str(exc), code="ACTION_INVALID", status_code=400) from exc
-    return PlayOut(
+    out = PlayOut(
         turn_id=res.turn_id,
         channel=res.channel,
         narration=res.narration,
@@ -129,6 +129,36 @@ async def _handle(
         metrics=res.metrics,
         ooc=res.ooc,
     )
+    await _record_feed(session, h, body, out)
+    return out
+
+
+async def _record_feed(
+    session: AsyncSession, h: CampaignHandle, body: PlayBody, out: PlayOut
+) -> None:
+    """The player's feed (Milestone 10): the turn exactly as this player saw it, so any device
+    can show the history. Presentation only, like turn metrics: no Event, no world state."""
+    from app.persistence.models import PlayerTurn
+    from app.services.perspective import PerspectiveService
+
+    to_names: list[str] = []
+    if body.target_actor_ids:
+        view = await PerspectiveService(session).scene_view(body.actor_id)
+        known = {p.actor_id: p.known_as for p in (view.participants if view else [])}
+        to_names = [known.get(t, "someone") for t in body.target_actor_ids]
+    session.add(
+        PlayerTurn(
+            campaign_id=h.campaign_id,
+            timeline_id=h.timeline_id,
+            actor_id=body.actor_id,
+            turn_id=out.turn_id,
+            input_text=body.text,
+            channel=body.channel,
+            to_names=to_names,
+            result=json.loads(out.model_dump_json()),
+        )
+    )
+    await session.commit()
 
 
 async def _handle_for(campaign_id: uuid.UUID, session: AsyncSession) -> CampaignHandle:

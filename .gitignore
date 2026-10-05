@@ -27,3 +27,9 @@ docs/spikes/raw/
 Thumbs.db
 .vscode/
 .idea/
+
+# browser client build and test output (Milestone 10)
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+frontend/screenshots/

@@ -47,6 +47,13 @@ DEFAULT_STYLE = {
     "mechanics_visibility": "no numbers; outcomes only",
 }
 SHORT_STYLE = {**DEFAULT_STYLE, "verbosity": "resolve in two sentences"}
+# campaign.settings.narration_style may be a preset name (the player client's choice) or a
+# dict of style overrides
+STYLE_PRESETS: dict[str, dict[str, str]] = {
+    "terse": {"verbosity": "two or three sentences", "description_density": "spare"},
+    "standard": {},
+    "rich": {"verbosity": "120-200 words", "description_density": "rich"},
+}
 
 
 @dataclass
@@ -59,6 +66,9 @@ class NarrativeBundle:
     style: dict[str, str]
     own_input: str = ""
     compressed: list[str] = field(default_factory=list)  # governor summaries
+    # what became of the focus actor's own attempts this turn, authoritative (A9 slice:
+    # an invalid pick-up was narrated as success because only the intent was given)
+    outcomes: list[str] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
@@ -66,6 +76,11 @@ class NarrativeBundle:
 
     def situation(self) -> str:
         parts = [f"The player ({'you'}) did: {self.own_input}"] if self.own_input else []
+        if self.outcomes:
+            parts.append(
+                "Outcome of what you attempted (authoritative; narrate exactly this):\n- "
+                + "\n- ".join(self.outcomes)
+            )
         if self.observations:
             parts.append("What you observed this turn:\n- " + "\n- ".join(self.observations))
         if self.dialogue:
@@ -103,6 +118,7 @@ class NarrationService:
         style: dict[str, Any] | None,
         short: bool = False,
         compressed: list[str] | None = None,
+        outcomes: list[str] | None = None,
     ) -> NarrativeBundle:
         """Only the focus actor's own Observations for this turn's events, the transcript lines
         of speech events whose recipients include them, and mechanics they can see."""
@@ -175,6 +191,8 @@ class NarrationService:
             else "nowhere in particular"
         )
         base = SHORT_STYLE if short else DEFAULT_STYLE
+        if isinstance(style, str):
+            style = STYLE_PRESETS.get(style, {})
         return NarrativeBundle(
             focus_actor_id,
             rendered,
@@ -184,6 +202,7 @@ class NarrationService:
             {**base, **{k: str(v) for k, v in (style or {}).items()}},
             own_input,
             list(compressed or []),
+            list(outcomes or []),
         )
 
     async def _speaker_name(

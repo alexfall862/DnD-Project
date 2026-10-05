@@ -6,7 +6,7 @@ BACKEND := backend
 UV := uv --directory $(BACKEND)
 RUN := $(UV) run
 
-.PHONY: help setup dev api web worker db-up db-down db-logs migrate migrate-new reset-db \
+.PHONY: help setup dev api web web-install web-build web-test e2e worker db-up db-down db-logs migrate migrate-new reset-db \
         test test-unit test-integration test-invariants test-leakage test-rules test-replay \
         test-latency test-stress eval-local seed-demo play lint format
 
@@ -43,8 +43,20 @@ api: ## Run the FastAPI backend with reload
 
 dev: db-up migrate api ## Start db, migrate, run api
 
-web: ## (Milestone 10) frontend dev server
-	@echo "frontend is deferred to Milestone 10 (see frontend/README.md)"
+web: ## Browser client dev server (proxies /api to :8000; open on a phone via the LAN/tailnet address)
+	cd frontend && npm run dev
+
+web-install: ## Install the browser client dependencies (and Playwright Chromium for e2e)
+	cd frontend && npm install && npx playwright install chromium
+
+web-build: ## Build the browser client into frontend/dist (then `make api` serves it on :8000)
+	cd frontend && npm run build
+
+web-test: ## Browser client unit tests (Vitest) and typecheck
+	cd frontend && npm run typecheck && npm test
+
+e2e: ## Browser end-to-end tests: real UI + API, scripted FakeModel, test database (needs db-up)
+	cd frontend && npx playwright test
 
 worker: ## Background worker (jobs: embeddings, memory processing, journals, simulation): make worker ARGS="--once"
 	$(RUN) python -m app.worker $(ARGS)

@@ -431,3 +431,228 @@ async def end_scene(
         embedder=getattr(state, "embedder", None),
     )
     return await orch.end_scene(CampaignHandle(c.id, c.active_timeline_id), scene_id)
+
+
+@router.get("/turns/{turn_id}", dependencies=[Depends(require_debug)])
+async def turn_trace(
+    turn_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """Everything one turn did (api-contracts §25 turn correlation; Milestone 10 acceptance:
+    a developer expands a turn to trace its internal resolution). Omniscient: hidden rolls
+    are included and marked."""
+    from app.persistence.models import Intent, TranscriptMessage
+    from app.persistence.models.rules import Action, ResolutionTraceRecord, Roll
+
+    metrics = (
+        await session.execute(select(TurnMetrics).where(TurnMetrics.turn_id == turn_id))
+    ).scalar_one_or_none()
+    intents = (
+        (
+            await session.execute(
+                select(Intent).where(Intent.turn_id == turn_id).order_by(Intent.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    actions = (
+        (
+            await session.execute(
+                select(Action).where(Action.turn_id == turn_id).order_by(Action.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    traces = (
+        (
+            await session.execute(
+                select(ResolutionTraceRecord).where(
+                    ResolutionTraceRecord.action_id.in_([a.id for a in actions])
+                )
+            )
+        )
+        .scalars()
+        .all()
+        if actions
+        else []
+    )
+    messages = (
+        (
+            await session.execute(
+                select(TranscriptMessage)
+                .where(TranscriptMessage.turn_id == turn_id)
+                .order_by(TranscriptMessage.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    runs = (
+        (
+            await session.execute(
+                select(ModelRun).where(ModelRun.turn_id == turn_id).order_by(ModelRun.started_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not (metrics or intents or actions or runs or messages):
+        raise NotFound("no such turn")
+    # the turn's events: the sequence window spanned by everything the turn wrote
+    anchor_ids = {
+        x for a in actions for x in (a.start_event_id, a.resolution_event_id) if x is not None
+    } | {m.event_id for m in messages if m.event_id is not None}
+    events: list[Event] = []
+    if anchor_ids:
+        anchors = (
+            (await session.execute(select(Event).where(Event.id.in_(anchor_ids)))).scalars().all()
+        )
+        if anchors:
+            lo = min(e.sequence_number for e in anchors)
+            hi = max(e.sequence_number for e in anchors)
+            events = (
+                (
+                    await session.execute(
+                        select(Event)
+                        .where(
+                            Event.campaign_id == anchors[0].campaign_id,
+                            Event.timeline_id == anchors[0].timeline_id,
+                            Event.sequence_number >= lo,
+                            Event.sequence_number <= hi,
+                        )
+                        .order_by(Event.sequence_number)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    roll_ids: set[str] = set()
+    for t in traces:
+        raw = t.roll_ids
+        roll_ids |= {
+            str(r)
+            for r in (
+                raw if isinstance(raw, list) else raw.values() if isinstance(raw, dict) else []
+            )
+        }
+    event_ids = [e.id for e in events]
+    rolls = []
+    if event_ids or roll_ids:
+        conds = []
+        if event_ids:
+            conds.append(Roll.event_id.in_(event_ids))
+        ids = []
+        for r in roll_ids:
+            try:
+                ids.append(uuid.UUID(r))
+            except ValueError:
+                pass
+        if ids:
+            conds.append(Roll.id.in_(ids))
+        from sqlalchemy import or_
+
+        rolls = (await session.execute(select(Roll).where(or_(*conds)))).scalars().all()
+    return {
+        "turn_id": str(turn_id),
+        "metrics": None
+        if metrics is None
+        else {
+            "wall_ms_total": metrics.wall_ms_total,
+            "ms_to_first_output": metrics.ms_to_first_output,
+            "ms_to_first_narration_token": metrics.ms_to_first_narration_token,
+            "sync_model_calls": metrics.sync_model_calls,
+            "background_model_calls": metrics.background_model_calls,
+            "calls_by_role": metrics.calls_by_role,
+            "prompt_tokens_total": metrics.prompt_tokens_total,
+            "completion_tokens_total": metrics.completion_tokens_total,
+            "degradation_steps": metrics.degradation_steps,
+            "budget_breached": metrics.budget_breached,
+        },
+        "intents": [
+            {
+                "id": str(i.id),
+                "actor_id": str(i.actor_id),
+                "type": i.intent_type,
+                "text": i.natural_text,
+                "structured": i.structured,
+                "status": i.status,
+            }
+            for i in intents
+        ],
+        "actions": [
+            {
+                "id": str(a.id),
+                "actor_id": str(a.actor_id),
+                "action": a.action_key,
+                "target": a.target_ref,
+                "status": a.status,
+                "reason": a.reason,
+                "params": a.params,
+                "effects": a.effects,
+            }
+            for a in actions
+        ],
+        "resolution": [
+            {
+                "action_id": str(t.action_id),
+                "summary": t.summary,
+                "rules_consulted": t.rules_consulted,
+                "requirements": t.requirements,
+                "modifiers": t.modifiers,
+                "effects_applied": t.effects_applied,
+                "effects_rejected": t.effects_rejected,
+                "trace": t.trace,
+            }
+            for t in traces
+        ],
+        "rolls": [
+            {
+                "id": str(r.id),
+                "actor_id": str(r.actor_id) if r.actor_id else None,
+                "expression": r.expression,
+                "raw": r.raw,
+                "kept": r.kept,
+                "modifier": r.modifier,
+                "total": r.final_result,
+                "purpose": r.purpose,
+                "visibility": r.visibility,
+                "hidden_in_production": r.visibility != "public",
+            }
+            for r in rolls
+        ],
+        "messages": [
+            {
+                "speaker_actor_id": str(m.speaker_actor_id) if m.speaker_actor_id else None,
+                "channel": m.channel,
+                "source": m.source,
+                "text": m.raw_text,
+            }
+            for m in messages
+        ],
+        "events": [
+            {
+                "id": str(e.id),
+                "seq": e.sequence_number,
+                "type": e.event_type,
+                "tick": e.game_tick,
+                "payload": e.payload,
+            }
+            for e in events
+        ],
+        "model_runs": [
+            {
+                "id": str(r.id),
+                "role": r.role,
+                "status": r.status,
+                "latency_ms": r.latency_ms,
+                "prompt_tokens": r.prompt_tokens,
+                "completion_tokens": r.completion_tokens,
+                "model_echo": r.model_echo,
+                "context_snapshot_id": str(r.context_snapshot_id)
+                if r.context_snapshot_id
+                else None,
+            }
+            for r in runs
+        ],
+    }

@@ -42,6 +42,7 @@ from app.worldgen.itemized import (
     KIND,
     blame,
     fill_task,
+    item_focus,
     merge_filled,
     outline_errors,
     outline_task,
@@ -508,6 +509,7 @@ class GenerationService:
                     errors,
                     rules=rules,
                     head=fill_task(stage, item, items, guide),
+                    focus=item_focus(item, items),
                 ),
                 f"item {item.ref}",
             )
@@ -556,6 +558,7 @@ class GenerationService:
         rules: RulesEngine | None = None,
         partial: WorldAuthorOut | None = None,
         head: list[str] | None = None,  # itemized outline/fill task instead of the stage task
+        focus: set[str] | None = None,  # refs this call is about (an item and its links)
     ) -> dict[str, str]:
         rs = (rules or self.engine).ruleset
         established = [
@@ -617,7 +620,10 @@ class GenerationService:
         return {
             "brief": brief.as_context(),
             "established_canon": "\n".join(established) or "none yet",
-            "latent_canon": "\n".join(catalog.summary_lines()) or "nothing yet",
+            "latent_canon": "\n".join(
+                catalog.relevant_lines(set(stage.depends_on) | {stage.key}, focus)
+            )
+            or "nothing yet",
             "task": "\n".join(task),
             "rules_public": "\n".join(rules),
         }
