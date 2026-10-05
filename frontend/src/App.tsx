@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Shell } from "./components/Shell";
 import { AppProvider, readPref, useApp } from "./state";
+import { TurnsProvider } from "./turns";
 import { DebugView } from "./views/Debug";
 import {
   CharacterView,
@@ -46,7 +47,9 @@ export default function App() {
   useEffect(() => applyTheme(readPref("theme", "system")), []);
   return (
     <AppProvider>
-      <Routed />
+      <TurnsProvider>
+        <Routed />
+      </TurnsProvider>
     </AppProvider>
   );
 }

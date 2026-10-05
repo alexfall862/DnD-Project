@@ -88,3 +88,22 @@ async def test_the_players_words_say_who_comes_along() -> None:
     assert await who("We go over to the guard house.") == {elara, tomas}
     assert await who("I go to the guard house.") == set()
     assert await who("Tomas, would you look at the guard house records?") == set()
+
+
+def test_the_models_ref_words_find_the_person_before_the_sentence_finds_a_place() -> None:
+    """A9 session replay: "tail this merchant" with the ref "irritated_merchant" matched no ref;
+    the sentence then matched "a shuttered warehouse with a faded merchant sign" by one word
+    and the party walked away from the merchant."""
+    from app.services.orchestrator import by_ref_words
+
+    cands = [
+        Candidate("an_irritated_merchant", "actor", "a1", "an irritated merchant"),
+        Candidate(
+            "shuttered", "location", "l2", "a shuttered warehouse with a faded merchant sign"
+        ),
+    ]
+    assert by_ref_words(cands, "irritated_merchant") is cands[0]
+    # a place is never picked by one shared word alone
+    assert (
+        closer_to_words(cands, None, "We tail this merchant.", kinds=("location", "zone")) is None
+    )

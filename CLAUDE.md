@@ -69,8 +69,17 @@ once per session; then, for each milestone, read only the `## Read` context pack
   endpoints; dev material is violet and comes only from `/debug`. The narrator now receives
   each attempt's authoritative outcome, and the player's words outrank a loose model target
   (A9 slice findings, `docs/spikes/frostbridge-a9-2026-10-04.md`). The play feed is kept
-  server-side (`player_turns`, `GET /characters/{id}/feed`). The A9 evals:
-  `tests/eval/test_frostbridge_a9.py` (slice + World Simulator), `test_worldgen_a9.py`.
+  server-side (`player_turns`, `GET /characters/{id}/feed`). Play-session fixes (10c):
+  - Live turn diagnostics: `stage` and `model_call` stream events.
+  - Dice: `campaign.settings.dice_mode` is manual (click-to-roll, `pending_rolls`) or auto.
+    Tests set `DICE_MODE_DEFAULT=auto`. The roll certificate is `GET /debug/rolls/{id}`.
+  - Social actions are rolled by the engine.
+  - Extras are promoted on the second engagement (`app/services/promotion.py`).
+  - The scene log (`app/services/scene_log.py`) feeds the narrator and interpreter.
+  - OOC goes to the `table_assistant` role.
+  The A9 evals:
+  `tests/eval/test_frostbridge_a9.py` (slice + World Simulator), `test_worldgen_a9.py`,
+  `test_session_replay_a9.py` (the 2026-10-05 browser session).
 - Milestone 08 landed `SimulationService` (one bounded run per crossed 6-hour boundary or
   wait/rest: scheduled events → plan clocks → candidates → at most one World Simulator call →
   `simulation.run` event), the `background_jobs` worker (`app/worker.py`), and NPC whispers.

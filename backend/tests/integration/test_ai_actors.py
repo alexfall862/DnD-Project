@@ -1281,3 +1281,104 @@ async def test_a_whispered_question_tells_the_listener_who_did_not_hear(
     assert seen, "Mira was not asked"
     assert "just whispered to you; only you heard it" in seen[0]
     assert "did NOT hear it" in seen[0]
+
+
+async def test_a_social_action_is_spoken_and_rolled_by_the_engine(
+    session: AsyncSession, frostbridge: World
+) -> None:
+    """Play session 2026-10-05: "propose_participation" became an improvised d20 and the
+    listener never heard it. Now the words reach the listener as speech, the engine rolls the
+    matching skill (no ruling call), and the listener is told how convincing it was."""
+    w = frostbridge
+    fake = FakeModelProvider()
+    fake.register(
+        "intent_interpreter",
+        responder(
+            {
+                "Let me in on it": intent(
+                    "say",
+                    intents=[
+                        ("express_interest", "mira", None),
+                        ("propose_participation", "mira", None),
+                    ],
+                    targets=["mira"],
+                    band="brief",
+                )
+            }
+        ),
+    )
+    seen: list[str] = []
+
+    def mira(req):
+        seen.append(req.user)
+        return npc("Maybe. Talk to me later.", act="answer")
+
+    fake.register("npc_actor", by_actor({"Mira": mira, "Renn": npc(None, act="silence")}))
+    fake.register("ai_player", by_actor({"Elara": pc(None), "Tomas": pc(None)}))
+    orch = make(session, fake, spotlight_visible_reactions=1)
+    res = await orch.process_player_input(
+        w.h,
+        PlayRequest(w.actors["Alex"], "Innkeeper, you know what you have. Let me in on it."),
+    )
+    social = [a for a in res.actions if a["action"].startswith("social.")]
+    assert [a["action"] for a in social] == ["social.persuade"]  # two intents, one check
+    assert res.visible_rolls and res.visible_rolls[0]["purpose"] == "Persuasion"
+    assert "rules_adjudicator" not in res.metrics["calls_by_role"]
+    heard = (
+        (await session.execute(select(Claim).where(Claim.speaker_actor_id == w.actors["Alex"])))
+        .scalars()
+        .all()
+    )
+    assert heard is not None
+    assert seen and "Persuasion attempt" in seen[0]
+    assert ("convincing" in seen[0]) or ("unconvincing" in seen[0])
+
+
+async def test_an_unparseable_interpretation_still_plays_the_turn(
+    session: AsyncSession, frostbridge: World
+) -> None:
+    """Play session 2026-10-05: two one-paragraph inputs failed with "Expecting ','". The turn
+    now goes on: words in quotes are spoken; a described deed is ruled on as one attempt."""
+    w = frostbridge
+    fake = FakeModelProvider()
+    fake.register("intent_interpreter", lambda req: '{"channel": "say", "intents": [')
+    fake.register(
+        "rules_adjudicator",
+        {"requires_check": False, "on_success": [], "on_failure": [], "summary": "fine"},
+    )
+    fake.register(
+        "npc_actor", by_actor({"Mira": npc(None, act="silence"), "Renn": npc(None, act="silence")})
+    )
+    fake.register("ai_player", by_actor({"Elara": pc(None), "Tomas": pc(None)}))
+    orch = make(session, fake)
+    said = await orch.process_player_input(
+        w.h, PlayRequest(w.actors["Alex"], 'I lean in. "Either way it is mine."')
+    )
+    assert said.channel == "say"
+    assert any("fallback: say" in n for n in said.metrics.get("notes", []))
+    did = await orch.process_player_input(
+        w.h, PlayRequest(w.actors["Alex"], "We tail the merchant through the market.")
+    )
+    assert did.metrics["calls_by_role"].get("rules_adjudicator") == 1
+
+
+async def test_the_players_words_name_an_attack_target(
+    session: AsyncSession, frostbridge: World
+) -> None:
+    """Play session 2026-10-05: "attack and rob the merchant" asked which guard was meant."""
+    w = frostbridge
+    fake = FakeModelProvider()
+    fake.register(
+        "intent_interpreter",
+        responder({"innkeeper": intent("do", intents=[("attack", "the_bar_owner", None)])}),
+    )
+    fake.register(
+        "npc_actor", by_actor({"Mira": npc(None, act="silence"), "Renn": npc(None, act="silence")})
+    )
+    fake.register("ai_player", by_actor({"Elara": pc(None), "Tomas": pc(None)}))
+    fake.register("npc_tactical", {"action": "wait"})
+    orch = make(session, fake)
+    res = await orch.process_player_input(
+        w.h, PlayRequest(w.actors["Alex"], "I attack the innkeeper.")
+    )
+    assert res.actions and res.actions[0]["action"] == "action.attack"

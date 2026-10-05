@@ -99,6 +99,21 @@ class ModelRunner:
         self.session = session
         self.router = router
         self.prompts = prompts or PromptRepository()
+        # live diagnostics: called with ("model_call", payload) as calls start, wait, retry and
+        # finish (the orchestrator forwards them on the turn stream)
+        self.observer = None
+
+    def _notify(self, payload: dict) -> None:
+        if self.observer is not None:
+            try:
+                self.observer("model_call", payload)
+            except Exception:  # noqa: BLE001 - diagnostics never break a call
+                pass
+
+    def _watch(self, req, run_id, role: str) -> None:
+        req.on_wait = lambda info: self._notify(
+            {"phase": "waiting", "run_id": str(run_id), "role": role, **info}
+        )
 
     def _request(
         self, ctx: CompiledContext, *, temperature: float | None, run_id: uuid.UUID
@@ -189,6 +204,19 @@ class ModelRunner:
         )
         self.session.add(row)
         await self.session.flush()
+        self._watch(req, run_id, ctx.role.name)
+        self._notify(
+            {
+                "phase": "started",
+                "run_id": str(run_id),
+                "role": ctx.role.name,
+                "actor_id": str(ctx.actor_id) if ctx.actor_id else None,
+                "context_snapshot_id": str(ctx.snapshot_id) if ctx.snapshot_id else None,
+                "context_tokens": ctx.estimated_tokens,
+                "max_tokens": req.max_tokens,
+                "model": route.model,
+            }
+        )
         return _Pending(run_id, ctx, req, route, row)
 
     async def _complete(self, p: _Pending, first: ModelResponse | ProviderError) -> RunResult:
@@ -197,6 +225,15 @@ class ModelRunner:
         if isinstance(first, ProviderError):
             row.status, row.error, row.ended_at = "failed", str(first), datetime.now(UTC)
             await self.session.flush()
+            self._notify(
+                {
+                    "phase": "finished",
+                    "run_id": str(run_id),
+                    "role": ctx.role.name,
+                    "status": "failed",
+                    "error": str(first)[:300],
+                }
+            )
             return RunResult(run_id, "failed", None, "", errors=[str(first)], calls=calls)
         resp = first
         text, structured, output, errors = resp.text, None, None, []
@@ -219,6 +256,17 @@ class ModelRunner:
                         text = fixed
             if output is None and ctx.role.repair:
                 calls += 1
+                self._notify(
+                    {
+                        "phase": "retry",
+                        "run_id": str(run_id),
+                        "role": ctx.role.name,
+                        "reason": "cut off"
+                        if resp.finish_reason == "length"
+                        else "; ".join(errors)[:200],
+                        "first_completion_tokens": resp.completion_tokens,
+                    }
+                )
                 truncated = resp.finish_reason == "length"
                 instruction = (
                     truncated_instruction(ctx.role.name)
@@ -298,6 +346,19 @@ class ModelRunner:
                 )
             )
         await self.session.flush()
+        self._notify(
+            {
+                "phase": "finished",
+                "run_id": str(run_id),
+                "role": ctx.role.name,
+                "status": status,
+                "latency_ms": resp.latency_ms,
+                "prompt_tokens": resp.prompt_tokens,
+                "completion_tokens": resp.completion_tokens,
+                "calls": calls,
+                "errors": errors[:3],
+            }
+        )
         return RunResult(
             run_id,
             status,
@@ -345,6 +406,19 @@ class ModelRunner:
         )
         self.session.add(row)
         await self.session.flush()
+        self._watch(req, run_id, ctx.role.name)
+        self._notify(
+            {
+                "phase": "started",
+                "run_id": str(run_id),
+                "role": ctx.role.name,
+                "context_snapshot_id": str(ctx.snapshot_id) if ctx.snapshot_id else None,
+                "context_tokens": ctx.estimated_tokens,
+                "max_tokens": req.max_tokens,
+                "model": route.model,
+                "stream": True,
+            }
+        )
         started = datetime.now(UTC)
         chunks: list[str] = []
         try:
@@ -354,6 +428,15 @@ class ModelRunner:
         except ProviderError as exc:
             row.status, row.error, row.ended_at = "failed", str(exc), datetime.now(UTC)
             await self.session.flush()
+            self._notify(
+                {
+                    "phase": "finished",
+                    "run_id": str(run_id),
+                    "role": ctx.role.name,
+                    "status": "failed",
+                    "error": str(exc)[:300],
+                }
+            )
             yield RunResult(run_id, "failed", None, "".join(chunks), errors=[str(exc)])
             return
         text = "".join(chunks)
@@ -369,6 +452,16 @@ class ModelRunner:
         row.latency_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
         row.ended_at = datetime.now(UTC)
         await self.session.flush()
+        self._notify(
+            {
+                "phase": "finished",
+                "run_id": str(run_id),
+                "role": ctx.role.name,
+                "status": row.status,
+                "latency_ms": row.latency_ms,
+                "completion_chars": len(text),
+            }
+        )
         yield RunResult(run_id, row.status, output, text, structured, errors, row.latency_ms or 0)
 
 

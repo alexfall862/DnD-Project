@@ -219,3 +219,42 @@ def resolve_opposed(
     else:
         winner = {"defender": "b", "attacker": "a", "success": "a", "failure": "b"}[cdef.tie]
     return OpposedResult(a=a, b=b, winner=winner, tie=tie, margin=margin)
+
+
+def preview_check(
+    ruleset: Ruleset,
+    calc: StatCalculator,
+    state: ActorState,
+    check_key: str,
+    *,
+    attribute: str | None = None,
+    skill: str | None = None,
+    difficulty: int | str | None = None,
+    ctx: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """What a check will be, without rolling (dice step, play session 2026-10-05): the die,
+    the bonus the actor brings and the number to reach. The same arithmetic as
+    `resolve_check`, so the card the player sees matches what resolution will use."""
+    ctx = dict(ctx or {})
+    cdef: CheckDef = ruleset.checks[check_key]
+    attribute = attribute or cdef.attribute
+    skill = skill or cdef.skill
+    if skill and attribute is None:
+        attribute = ruleset.skills[skill].default_attribute
+    attr_value = calc.calculate(state, attribute, ctx).value if attribute else 0
+    skill_value = calc.calculate(state, skill, ctx).value if skill else 0
+    mods = calc.check_modifier(state, check_key, ctx)
+    target = _target_value(ruleset, difficulty) if cdef.versus == "difficulty" else None
+    return {
+        "check": check_key,
+        "die": _advantage_roll(cdef.roll, mods.advantage),
+        "attribute": attribute,
+        "attribute_value": attr_value,
+        "skill": skill,
+        "skill_value": skill_value,
+        "modifier_total": mods.value,
+        "modifier_lines": [str(x) for x in mods.lines],
+        "bonus": attr_value + skill_value + mods.value,
+        "target": target,
+        "advantage": mods.advantage,
+    }

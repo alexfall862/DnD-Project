@@ -4,7 +4,7 @@ version: 1
 role: brief_interviewer
 authority: [campaign_brief]
 schema: BriefInterviewOut
-max_tokens: 350
+max_tokens: 600
 restrictions: [brief fields only, one question at a time, infer several settings per answer]
 ---
 Role: Brief Interviewer. Help a player shape a new campaign by conversation (guided

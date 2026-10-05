@@ -9,6 +9,7 @@ and private channels commit nothing in-world."""
 from __future__ import annotations
 
 import json
+import re
 import uuid
 
 import pytest
@@ -61,8 +62,12 @@ def responder(table: dict[str, dict]):
     """Fake Intent Interpreter: answer by which phrase appears in the player input."""
 
     def pick(req):
+        # the player's own line only: the context also carries the scene so far, which
+        # repeats earlier inputs (scene log, play session 2026-10-05)
+        m = re.search(r'Player input \(channel: \w+\): "(.*)"', req.user)
+        text = m.group(1) if m else req.user
         for phrase, out in table.items():
-            if phrase in req.user:
+            if phrase in text:
                 return out
         raise AssertionError(f"no fake intent for input: {req.user[-200:]}")
 
@@ -172,7 +177,10 @@ async def test_compound_input_decomposes_into_ordered_actions_and_speech(
         and tm.calls_by_role == {"intent_interpreter": 1}
         and not tm.budget_breached
     )
-    assert any("picks something up" in n or "You say" in n for n in res.mechanical_notices)
+    assert any(
+        "picks something up" in n or "You say" in n
+        for n in [*res.mechanical_notices, *res.dev_notes]
+    )
 
 
 async def two_thieves(session: AsyncSession, w: World, orch: SessionOrchestrator):
@@ -404,7 +412,7 @@ async def test_player_assertions_per_class_and_policy(
             )
             assert len(items) == 1 and items[0].mechanical_snapshot.get("equipped") is False
     else:
-        assert facts == [] and any("(OOC)" in n for n in res.mechanical_notices)
+        assert facts == [] and any(n.startswith("assertion") for n in res.dev_notes)
     if class_ == "contradiction":
         stated = (
             (
@@ -528,7 +536,7 @@ async def test_adjudicator_rulings_check_no_check_and_rejected(
     rolls = (
         (
             await session.execute(
-                select(Roll).where(Roll.actor_id == w.actors["Alex"], Roll.purpose == "improvised")
+                select(Roll).where(Roll.actor_id == w.actors["Alex"], Roll.purpose == "athletics")
             )
         )
         .scalars()
@@ -585,7 +593,7 @@ async def test_adjudicator_rulings_check_no_check_and_rejected(
     res3 = await make(session, fake3).process_player_input(
         w.h, PlayRequest(w.actors["Alex"], "I hack the mainframe.")
     )
-    assert not res3.actions and any("ruling rejected" in n for n in res3.mechanical_notices)
+    assert not res3.actions and any("ruling rejected" in n for n in res3.dev_notes)
     assert len((await session.execute(select(Action))).scalars().all()) == n_actions
 
 
@@ -593,7 +601,10 @@ async def test_ooc_and_private_commit_nothing_in_world(
     session: AsyncSession, frostbridge: World
 ) -> None:
     w = frostbridge
-    orch = make(session, FakeModelProvider())  # no intent fixture: the model must not be called
+    fake = FakeModelProvider().register(
+        "table_assistant", "Sure. Your character can take it slowly; nothing has to happen yet."
+    )
+    orch = make(session, fake)  # OOC asks the table assistant; nothing else is called
     n = len(
         (await session.execute(select(Event).where(Event.campaign_id == w.h.campaign_id)))
         .scalars()
@@ -602,7 +613,15 @@ async def test_ooc_and_private_commit_nothing_in_world(
     res = await orch.process_player_input(
         w.h, PlayRequest(w.actors["Alex"], "/ooc can we slow down a bit?")
     )
-    assert res.channel == "ooc" and res.ooc and res.metrics["sync_model_calls"] == 0
+    assert res.channel == "ooc" and res.ooc.startswith("Sure.")
+    assert res.metrics["calls_by_role"] == {"table_assistant": 1}
+    # the assistant sees only Alex's perspective: no hidden truth reaches it
+    asked = [
+        c.request.user
+        for c in fake.calls
+        if "table_assistant" in c.request.profile + c.request.system
+    ]
+    assert asked and not any("killed" in u.lower() for u in asked)
     res = await orch.process_player_input(
         w.h, PlayRequest(w.actors["Alex"], "/think I don't trust the captain.")
     )

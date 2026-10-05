@@ -148,7 +148,10 @@ async def test_scripted_session_through_the_harness(app, client, fixtures) -> No
     assert lines[0].startswith("# narrator ok")
     assert any("keep this between us" in ln for ln in lines)
     assert any("Understood." in ln for ln in lines)
-    assert not any("Not for a week" in ln for ln in lines)  # an earlier turn, not this bundle
+    # an earlier turn reaches the narrator only through the scene log (continuity), never as
+    # this turn's dialogue: log lines are " | "-joined summaries of whole turns
+    earlier = [ln for ln in lines if "Not for a week" in ln]
+    assert earlier and all(" | " in ln for ln in earlier)
     lines.clear()
     await h.handle("/debug beliefs Tomas")
     assert not any("knows more than she says" in ln for ln in lines)  # Tomas was not whispered to

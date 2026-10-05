@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import { DieStylePicker, useDieStyle } from "../components/Dice";
 import { DevSwitch } from "../components/Shell";
 import { readPref, useApp, writePref } from "../state";
 
@@ -14,6 +15,7 @@ export function applyTheme(t: Theme) {
 export function SettingsView() {
   const { campaign, reloadCampaign, devAvailable } = useApp();
   const [theme, setTheme] = useState<Theme>(() => readPref<Theme>("theme", "system"));
+  const [dieStyle, setDieStyle] = useDieStyle();
   const [saving, setSaving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,6 +74,37 @@ export function SettingsView() {
               Developer visibility is unavailable: the server is not running with DEBUG_MODE.
             </p>
           )}
+        </section>
+
+        <section className="card stack">
+          <h3>Dice</h3>
+          <label className="stack">
+            <span>When the game calls for a roll</span>
+            <div className="segmented" role="group" aria-label="Dice mode">
+              {[
+                ["manual", "I roll"],
+                ["auto", "Auto-roll"],
+              ].map(([v, label]) => (
+                <button
+                  key={v}
+                  type="button"
+                  aria-pressed={(s.dice_mode ?? "manual") === v}
+                  disabled={saving !== null}
+                  onClick={() => save({ dice_mode: v })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <span className="muted small">
+              With "I roll", you see the check, the number to reach and what is at stake, then
+              roll yourself. Either way the engine rolls the dice, never the storyteller.
+            </span>
+          </label>
+          <div className="stack">
+            <span>Your dice (this device)</span>
+            <DieStylePicker style={dieStyle} onChange={setDieStyle} />
+          </div>
         </section>
 
         <section className="card stack">

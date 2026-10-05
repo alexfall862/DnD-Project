@@ -85,6 +85,7 @@ export const api = {
         method: "POST",
       }),
     turn: (turnId: Uuid) => request<TurnTrace>(`/debug/turns/${turnId}`),
+    roll: (rollId: Uuid) => request<Record<string, unknown>>(`/debug/rolls/${rollId}`),
     actors: (id: Uuid) => request<DebugActor[]>(`/debug/campaigns/${id}/actors`),
     events: (id: Uuid, limit = 60) =>
       request<Record<string, unknown>[]>(`/debug/campaigns/${id}/events${q({ limit: String(limit) })}`),
@@ -114,6 +115,9 @@ export const api = {
 
 export type StreamEvent =
   | { name: "accepted"; data: { turn_id: Uuid } }
+  | { name: "stage"; data: { stage: string; label: string } }
+  | { name: "roll_request"; data: Record<string, unknown> }
+  | { name: "model_call"; data: Record<string, unknown> & { run_id: string; role: string; phase: "started" | "waiting" | "retry" | "finished" } }
   | { name: "mechanics"; data: Record<string, unknown> }
   | { name: "speaker"; data: { actor: Uuid; text: string } }
   | { name: "reaction"; data: Record<string, unknown> }
@@ -172,8 +176,10 @@ export async function playStream(
     onEvent(ev);
     if (ev.name === "result") result = ev.data;
     if (ev.name === "error") {
-      if (ev.data.code === "ACTION_NEEDS_CLARIFICATION" && ev.data.details) {
-        throw new ClarificationNeeded(ev.data.details as unknown as Clarification);
+      if (ev.data.code === "ACTION_NEEDS_CLARIFICATION") {
+        // the orchestrator and the API both report it; either shape carries the question
+        const d = (ev.data.details ?? ev.data) as unknown as Clarification;
+        throw new ClarificationNeeded(d);
       }
       throw new ApiError(0, ev.data.code, ev.data.message, ev.data.details);
     }

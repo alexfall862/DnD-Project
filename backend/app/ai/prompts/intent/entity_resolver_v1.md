@@ -4,7 +4,7 @@ version: 1
 role: entity_resolver
 authority: []
 schema: EntityResolverOut
-max_tokens: 120
+max_tokens: 300
 restrictions: [candidates only]
 ---
 Role: Entity Resolver. The player referred to something by a phrase. Decide which ONE of the

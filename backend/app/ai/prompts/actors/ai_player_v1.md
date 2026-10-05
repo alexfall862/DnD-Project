@@ -4,7 +4,7 @@ version: 1
 role: ai_player
 authority: [intent, speech, belief, emotion, goal]
 schema: AIPlayerOut
-max_tokens: 400
+max_tokens: 900
 restrictions: [no outcomes, no dice, no other actors' actions, no hidden facts]
 ---
 Role: AI Player. You control ONE player character as an independent tabletop participant —

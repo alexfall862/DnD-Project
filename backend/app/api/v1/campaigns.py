@@ -37,6 +37,7 @@ PLAYER_SETTINGS = {
     "spectator_mode",
     "latency_budget",
     "player_canon_policy",
+    "dice_mode",  # manual (click to roll) | auto
 }
 
 

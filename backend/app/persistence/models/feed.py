@@ -41,3 +41,30 @@ class PlayerTurn(Base):
     created_at: Mapped[datetime] = created_at_col()
 
     __table_args__ = (Index("ix_player_turns_actor", "actor_id", "created_at"),)
+
+
+class PendingRoll(Base):
+    """A check the game called for (dice step, play session 2026-10-05), waiting for the
+    player to roll or reconsider. Holds what the turn already decided (the interpretation,
+    any ruling) so that resuming re-interprets nothing: the only new thing is the dice."""
+
+    __tablename__ = "pending_rolls"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False
+    )
+    actor_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("actors.id", ondelete="CASCADE"), nullable=False
+    )
+    turn_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    original_input: Mapped[str] = mapped_column(Text, nullable=False)
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_actor_ids: Mapped[list[str]] = jsonb_col("[]")
+    intent: Mapped[dict[str, Any]] = jsonb_col()
+    rulings: Mapped[dict[str, Any]] = jsonb_col()
+    checks: Mapped[list[dict[str, Any]]] = jsonb_col("[]")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="open")
+    created_at: Mapped[datetime] = created_at_col()
+
+    __table_args__ = (Index("ix_pending_rolls_actor", "actor_id", "status"),)

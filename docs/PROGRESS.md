@@ -28,8 +28,8 @@ architectural decisions in `DECISIONS.md`.
 | 12 | Branching (timelines from an event) | Not started |
 | 13 | Polish / v0.1 release | Not started |
 
-Full backend suite: 368 passing tests (FakeModelProvider + real `ttrpg_test` database), about
-6 minutes, with 6 opt-in real-model evals skipped. Browser client: 6 Vitest and 7 Playwright
+Full backend suite: 379 passing tests (FakeModelProvider + real `ttrpg_test` database), about
+6 minutes, with 6 opt-in real-model evals skipped. Browser client: 10 Vitest and 15 Playwright
 tests (`make web-test`, `make e2e`).
 
 ## What is proven (by tests you can run with `make test`)
@@ -58,6 +58,14 @@ the barge, Renn walks to the dock by scheduled travel, the World Simulator is as
 the barge departs, the quarry escalates on Day +8 with no call; detaining Renn cancels all of it
 by prerequisite revalidation before any model is consulted. Every run is a `simulation.run`
 event with interval, candidates and budget.
+
+**Played by a human, then fixed against the real model.** The first browser session's lines
+replay on A9 (`docs/spikes/play-session-2026-10-05.md`):
+- no failed turns;
+- the merchant comes alive on the second exchange and remembers it;
+- checks pause for a click-to-roll with real skills and stakes;
+- OOC answers from the character's perspective;
+- every model call shows live in dev view.
 
 **Playable in the browser, on desktop and phone.** The whole Frostbridge scenario plays through
 the UI in a Playwright test. A developer can flip the DEV switch mid-play and expand any turn
@@ -140,9 +148,12 @@ branch, switch active timeline, continue independently, mechanical replay.
 exit criteria; latency work against the real model; release packaging.
 
 **Carried backlog (recorded in `DECISIONS.md`):**
-- From the real-model slice runs (`docs/spikes/frostbridge-a9-2026-10-04.md`):
-  - Speech turns still take 70–85 s at worst: claim extraction runs one call per incomplete
-    line, in sequence.
+- From the real-model runs (`docs/spikes/frostbridge-a9-2026-10-04.md`,
+  `docs/spikes/play-session-2026-10-05.md`):
+  - The median turn takes about 34 s; the worst turns take 70–130 s (claim extraction in
+    sequence, and interpreter repairs).
+  - GLM sometimes omits the spoken `utterance`.
+  - Game-master pacing (a director nudge) is deferred until after these fixes.
   - Narration occasionally misplaces known things.
   - The interpreter sometimes takes a request to a companion as the player's own action.
 - Browser client: unnamed places show as "Somewhere unfamiliar" (no public descriptor in the

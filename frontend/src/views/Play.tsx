@@ -1,41 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { ApiError, ClarificationNeeded, api, playStream, type StreamEvent } from "../api/client";
-import type {
-  Channel,
-  Clarification,
-  FeedEntry,
-  Participant,
-  PartyMember,
-  PlayResult,
-  SceneView,
-  Uuid,
-} from "../api/types";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { api } from "../api/client";
+import type { Channel, Clarification, Participant, PartyMember, PlayResult, SceneView } from "../api/types";
 import * as I from "../components/Icons";
+import { DiceRoll, RollRequestCard } from "../components/Dice";
 import { TraceView } from "../components/Trace";
 import { useApp } from "../state";
+import { useNow, useTurns, type CallInfo, type FeedTurn } from "../turns";
 
-// ---- feed model ----------------------------------------------------------------------------------
-
-export interface FeedTurn {
-  key: string;
-  input: { text: string; channel: Channel; to: string[] };
-  status: "streaming" | "done" | "error" | "clarify";
-  live: { speakers: { actor: Uuid; text: string }[]; narration: string; mechanics: string[] };
-  result?: PlayResult;
-  error?: string;
-  clarification?: Clarification;
-}
-
-// the feed lives on the server (GET /characters/{id}/feed): any device shows the same history
-function fromServer(entries: FeedEntry[]): FeedTurn[] {
-  return entries.map((e) => ({
-    key: e.turn_id,
-    input: e.input,
-    status: "done" as const,
-    live: { speakers: [], narration: "", mechanics: [] },
-    result: e.result,
-  }));
-}
+export type { FeedTurn } from "../turns";
 
 const CHANNELS: { id: Channel; label: string; hint: string }[] = [
   { id: "auto", label: "Auto", hint: "Describe what you do or say" },
@@ -46,47 +18,17 @@ const CHANNELS: { id: Channel; label: string; hint: string }[] = [
   { id: "ooc", label: "OOC", hint: "Out of character: ask the table, not the world" },
 ];
 
-// ---- mechanics summary of a streamed `mechanics` event ------------------------------------------
-
-function mechanicsLine(data: Record<string, unknown>): string | null {
-  const a = data.action as Record<string, unknown> | undefined;
-  if (a) return `${String(a.action).replace("action.", "")} → ${a.status}`;
-  const t = data.ai_turn as Record<string, unknown> | undefined;
-  if (t) {
-    const acts = (t.actions as Record<string, unknown>[] | undefined) ?? [];
-    return acts.map((x) => `${String(x.action).replace("action.", "")} → ${x.status}`).join("; ") || null;
-  }
-  return null;
-}
-
 // ---- view ----------------------------------------------------------------------------------------
 
 export function PlayView() {
-  const { campaign, focusActorId, focusName, dev, version, bump } = useApp();
+  const { campaign, focusActorId, focusName, dev, version, reloadCampaign } = useApp();
+  const [rolling, setRolling] = useState<string | null>(null);
+  const { feed, feedError, busy, send } = useTurns();
   const [scene, setScene] = useState<SceneView | null>(null);
   const [party, setParty] = useState<PartyMember[]>([]);
   const [sceneError, setSceneError] = useState<string | null>(null);
-  const [feed, setFeed] = useState<FeedTurn[]>([]);
-  const [busy, setBusy] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
-
   const cid = campaign?.id ?? "";
-  const [feedError, setFeedError] = useState<string | null>(null);
-  useEffect(() => {
-    if (!cid || !focusActorId) return;
-    let live = true;
-    api.feed(focusActorId).then(
-      (entries) => {
-        if (!live) return;
-        setFeed((f) => [...fromServer(entries), ...f.filter((t) => t.status !== "done")]);
-        setFeedError(null);
-      },
-      (e: Error) => live && setFeedError(e.message),
-    );
-    return () => {
-      live = false;
-    };
-  }, [cid, focusActorId]);
 
   useEffect(() => {
     if (!cid || !focusActorId) return;
@@ -113,59 +55,6 @@ export function PlayView() {
     const el = feedRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [feed]);
-
-  const send = useCallback(
-    async (text: string, channel: Channel, targets: Participant[], clarificationId?: string) => {
-      if (!cid || !focusActorId) return;
-      const key = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      const turn: FeedTurn = {
-        key,
-        input: { text, channel, to: targets.map((t) => t.known_as) },
-        status: "streaming",
-        live: { speakers: [], narration: "", mechanics: [] },
-      };
-      setFeed((f) => [...f.filter((t) => t.status !== "clarify"), turn]);
-      setBusy(true);
-      const update = (fn: (t: FeedTurn) => FeedTurn) =>
-        setFeed((f) => f.map((t) => (t.key === key ? fn(t) : t)));
-      const onEvent = (e: StreamEvent) => {
-        if (e.name === "narration_delta")
-          update((t) => ({ ...t, live: { ...t.live, narration: t.live.narration + e.data.text } }));
-        else if (e.name === "speaker")
-          update((t) => ({ ...t, live: { ...t.live, speakers: [...t.live.speakers, e.data] } }));
-        else if (e.name === "mechanics") {
-          const line = mechanicsLine(e.data);
-          if (line) update((t) => ({ ...t, live: { ...t.live, mechanics: [...t.live.mechanics, line] } }));
-        }
-      };
-      try {
-        const result = await playStream(
-          cid,
-          {
-            actor_id: focusActorId,
-            text,
-            channel,
-            target_actor_ids: targets.map((t) => t.actor_id).filter((x): x is string => !!x),
-            clarification_id: clarificationId,
-          },
-          onEvent,
-        );
-        setFeed((f) => f.map((t) => (t.key === key ? { ...t, status: "done" as const, result } : t)));
-        bump();
-      } catch (err) {
-        if (err instanceof ClarificationNeeded) {
-          update((t) => ({ ...t, status: "clarify", clarification: err.clarification }));
-        } else {
-          const msg =
-            err instanceof ApiError ? `${err.code}: ${err.message}` : (err as Error).message;
-          update((t) => ({ ...t, status: "error", error: msg }));
-        }
-      } finally {
-        setBusy(false);
-      }
-    },
-    [cid, focusActorId, bump],
-  );
 
   if (!campaign) return null;
   if (!focusActorId)
@@ -194,24 +83,170 @@ export function PlayView() {
               <p>The scene is yours. What do you do?</p>
             </div>
           )}
-          {feed.map((t) => (
+          {feed.map((t, i) => (
             <TurnCard
               key={t.key}
               turn={t}
               names={names}
               selfId={focusActorId}
               dev={dev}
+              answerable={i === feed.length - 1 && !busy}
+              rolling={rolling !== null && rolling === t.result?.roll_request?.id}
               onAnswer={(answer) =>
                 t.clarification &&
                 send(answer, t.input.channel, [], t.clarification.clarification_id)
               }
+              onRoll={async (decision, auto) => {
+                const id = t.result?.roll_request?.id;
+                if (!id) return;
+                if (auto && campaign) {
+                  await api.patchSettings(campaign.id, { dice_mode: "auto" });
+                  await reloadCampaign();
+                }
+                if (decision === "roll") setRolling(id);
+                try {
+                  await send(decision === "roll" ? "🎲 Roll" : "Reconsider", "do", [], undefined, { id, decision });
+                } finally {
+                  setRolling(null);
+                }
+              }}
             />
           ))}
         </div>
       </div>
-      <Composer busy={busy} others={others} onSend={send} />
+      <Composer
+        busy={busy}
+        others={others}
+        partyIds={party.map((m) => m.actor_id)}
+        onSend={send}
+      />
     </div>
   );
+}
+
+// ---- live status of a turn in flight ----------------------------------------------------------------
+
+const secs = (ms: number) => `${(Math.max(0, ms) / 1000).toFixed(1)} s`;
+
+export function LiveStatus({ turn, dev }: { turn: FeedTurn; dev: boolean }) {
+  const now = useNow(turn.status === "streaming");
+  const live = turn.live;
+  const end = turn.endedAt ?? now;
+  const running = live.calls.filter((c) => c.phase !== "finished");
+  const waiting = running.flatMap((c) => c.notes.filter((n) => n.startsWith("waiting")));
+  const label = live.stage?.label ?? (live.acceptedAt ? "Starting" : "Sending");
+  return (
+    <div className="live" role="status" aria-live="polite">
+      <div className="thinking">
+        {turn.status === "streaming" && (
+          <span className="dots">
+            <span />
+            <span />
+            <span />
+          </span>
+        )}
+        <span>
+          {turn.status === "streaming" ? `${label}…` : "Stopped"} <span className="muted">· {secs(end - live.sentAt)}</span>
+        </span>
+        {waiting.length > 0 && <span className="chip warn">{waiting[waiting.length - 1].replace("waiting: ", "")}</span>}
+      </div>
+      {dev && <CallTimeline turn={turn} now={end} />}
+    </div>
+  );
+}
+
+function CallTimeline({ turn, now }: { turn: FeedTurn; now: number }) {
+  const live = turn.live;
+  return (
+    <div className="trace small" data-testid="live-calls">
+      <span className="label">Live · dev only</span>
+      <div className="mono">
+        request sent {new Date(live.sentAt).toLocaleTimeString()}
+        {live.acceptedAt ? ` · accepted after ${secs(live.acceptedAt - live.sentAt)}` : " · not yet accepted"}
+        {live.turnId ? ` · turn ${live.turnId.slice(0, 8)}` : ""}
+      </div>
+      {live.stages.length > 0 && (
+        <div className="row">
+          {live.stages.map((s, i) => (
+            <span key={i} className="chip dev">
+              {s.label} +{secs(s.at - live.sentAt)}
+            </span>
+          ))}
+        </div>
+      )}
+      {live.calls.length === 0 ? (
+        <span className="muted">No model call yet.</span>
+      ) : (
+        <div className="table-wrap">
+          <table className="grid">
+            <thead>
+              <tr>
+                <th>Call</th>
+                <th>State</th>
+                <th>Time</th>
+                <th>Tokens</th>
+                <th>Sent</th>
+              </tr>
+            </thead>
+            <tbody>
+              {live.calls.map((c) => (
+                <CallRow key={c.run_id} c={c} now={now} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CallRow({ c, now }: { c: CallInfo; now: number }) {
+  const [open, setOpen] = useState(false);
+  const state = c.phase === "finished" ? c.status ?? "done" : c.phase === "started" ? "running" : c.phase;
+  return (
+    <>
+      <tr>
+        <td className="mono">{c.role}</td>
+        <td>
+          <span className={`chip ${state === "ok" ? "ok" : state === "failed" || state === "invalid" ? "bad" : state === "running" ? "dev" : "warn"}`}>
+            {state}
+          </span>
+          {c.notes.map((n, i) => (
+            <div key={i} className="muted">
+              {n}
+            </div>
+          ))}
+        </td>
+        <td className="mono">{secs((c.endedAt ?? now) - c.startedAt)}</td>
+        <td className="mono">
+          {c.prompt_tokens ?? c.context_tokens ?? "?"}→{c.completion_tokens ?? "…"}/{c.max_tokens ?? "?"}
+        </td>
+        <td>
+          <button type="button" className="btn small dev" onClick={() => setOpen((o) => !o)}>
+            {open ? "Hide" : "What was sent"}
+          </button>
+        </td>
+      </tr>
+      {open && (
+        <tr>
+          <td colSpan={5}>
+            <SentContext runId={c.run_id} />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function SentContext({ runId }: { runId: string }) {
+  const [data, setData] = useState<unknown>(null);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => {
+    api.debug.context(runId).then(setData, (e: Error) => setErr(e.message));
+  }, [runId]);
+  if (err) return <div className="error-box">{err}</div>;
+  if (!data) return <span className="muted">Loading…</span>;
+  return <pre className="json">{JSON.stringify(data, null, 2)}</pre>;
 }
 
 // ---- one turn -------------------------------------------------------------------------------------
@@ -221,13 +256,19 @@ export function TurnCard({
   names,
   selfId,
   dev,
+  answerable = true,
+  rolling = false,
   onAnswer,
+  onRoll,
 }: {
   turn: FeedTurn;
   names: Map<string, string>;
   selfId?: string | null;
   dev: boolean;
+  answerable?: boolean;
+  rolling?: boolean;
   onAnswer: (answer: string) => void;
+  onRoll?: (decision: "roll" | "reconsider", auto?: boolean) => void;
 }) {
   const [traceOpen, setTraceOpen] = useState(false);
   const r = turn.result;
@@ -240,6 +281,8 @@ export function TurnCard({
     s.actor_id === selfId || s.text.trim() === turn.input.text.trim();
   const narration = r ? r.narration : turn.live.narration;
   const ch = turn.input.channel;
+  const traceId = r?.turn_id ?? turn.turnId ?? turn.live.turnId;
+  const devNotes = (r as (PlayResult & { dev_notes?: string[] }) | undefined)?.dev_notes ?? [];
   return (
     <article className="turn" aria-busy={turn.status === "streaming"}>
       <div className={`player-line ${ch === "whisper" ? "whisper" : ""} ${ch === "ooc" ? "ooc" : ""}`}>
@@ -253,7 +296,7 @@ export function TurnCard({
       </div>
 
       {r ? (
-        <Mechanics result={r} dev={dev} />
+        <Mechanics result={r} dev={dev} fresh={turn.live.sentAt > 0} />
       ) : (
         turn.live.mechanics.length > 0 && (
           <div className="mechanics">
@@ -278,69 +321,83 @@ export function TurnCard({
 
       {r?.ooc && <div className="ooc-reply">{r.ooc}</div>}
 
-      {(narration || turn.status === "streaming") && (
+      {r?.roll_request &&
+        (answerable && onRoll ? (
+          <RollRequestCard
+            request={r.roll_request}
+            busy={false}
+            rolling={rolling}
+            onRoll={() => onRoll("roll")}
+            onReconsider={() => onRoll("reconsider")}
+            onAutoRoll={() => onRoll("roll", true)}
+          />
+        ) : (
+          <div className="muted small">{r.roll_request.prompt}</div>
+        ))}
+
+      {narration && (
         <div className="narration">
           {narration}
-          {turn.status === "streaming" && narration && <span className="cursor" />}
+          {turn.status === "streaming" && <span className="cursor" />}
         </div>
       )}
-      {turn.status === "streaming" && !narration && (
-        <div className="thinking" role="status">
-          <span className="dots">
-            <span />
-            <span />
-            <span />
-          </span>
-          {turn.live.mechanics.length ? "The world responds…" : "Working out what happens…"}
-        </div>
+      {(turn.status === "streaming" || (dev && turn.live.calls.length > 0 && turn.status !== "done")) && (
+        <LiveStatus turn={turn} dev={dev} />
       )}
 
-      {turn.status === "clarify" && turn.clarification && (
-        <Clarify c={turn.clarification} onAnswer={onAnswer} />
-      )}
+      {turn.status === "clarify" && turn.clarification &&
+        (answerable ? (
+          <Clarify c={turn.clarification} onAnswer={onAnswer} />
+        ) : (
+          <div className="muted small">Asked: {turn.clarification.question}</div>
+        ))}
       {turn.status === "error" && <div className="error-box">{turn.error}</div>}
 
-      {r && dev && (
-        <div className="turn-meta">
-          <span className="chip dev">
-            {((r.metrics.wall_ms_total ?? 0) / 1000).toFixed(1)} s
-          </span>
-          <span className="chip dev">{r.metrics.sync_model_calls ?? 0} calls</span>
-          {(r.metrics.degradation_steps ?? []).map((d) => (
-            <span className="chip warn" key={d}>
-              {d}
+      {dev && devNotes.length > 0 && (
+        <div className="mechanics dev-notes">
+          {devNotes.map((n, i) => (
+            <span key={i} className="mono">
+              {n.length > 300 ? `${n.slice(0, 300)}…` : n}
             </span>
           ))}
+        </div>
+      )}
+      {dev && traceId && turn.status !== "streaming" && (
+        <div className="turn-meta">
+          {r && (
+            <>
+              <span className="chip dev">{((r.metrics.wall_ms_total ?? 0) / 1000).toFixed(1)} s</span>
+              <span className="chip dev">{r.metrics.sync_model_calls ?? 0} calls</span>
+              {(r.metrics.degradation_steps ?? []).map((d) => (
+                <span className="chip warn" key={d}>
+                  {d}
+                </span>
+              ))}
+            </>
+          )}
           <button type="button" className="btn small dev" onClick={() => setTraceOpen((o) => !o)}>
             {traceOpen ? "Hide trace" : "Trace"}
           </button>
         </div>
       )}
-      {r && dev && traceOpen && <TraceView turnId={r.turn_id} />}
+      {dev && traceId && traceOpen && <TraceView turnId={traceId} />}
     </article>
   );
 }
 
-function Mechanics({ result, dev }: { result: PlayResult; dev: boolean }) {
+function Mechanics({ result, dev, fresh }: { result: PlayResult; dev: boolean; fresh: boolean }) {
   const lines: JSX.Element[] = [];
   result.actions.forEach((a, i) => {
     const failed = a.status === "invalid" || a.status === "failed";
     lines.push(
       <span key={`a${i}`} className={failed ? "muted" : undefined}>
-        ⚙ {a.action.replace("action.", "")}
+        ⚙ {a.action.replace(/^(action|social)\./, "").replace(/_/g, " ")}
         {a.target ? ` · ${a.target}` : ""} → {a.status}
         {dev && a.summary ? ` · ${a.summary}` : ""}
       </span>,
     );
   });
-  result.visible_rolls.forEach((r, i) =>
-    lines.push(
-      <span key={`r${i}`} className="roll">
-        <I.Dice style={{ width: 14, height: 14, verticalAlign: "-2px" }} /> {r.purpose}: {r.expression}
-        {r.modifier ? ` ${r.modifier > 0 ? "+" : ""}${r.modifier}` : ""} = <b>{r.total}</b>
-      </span>,
-    ),
-  );
+  const dice = result.visible_rolls.map((r, i) => <DiceRoll key={`r${i}`} roll={r} dev={dev} fresh={fresh} />);
   result.state_changes.forEach((c, i) =>
     lines.push(
       <span key={`s${i}`}>
@@ -361,8 +418,13 @@ function Mechanics({ result, dev }: { result: PlayResult; dev: boolean }) {
         ⏱ {Math.round(result.time_advanced_seconds / 60)} min pass
       </span>,
     );
-  if (!lines.length) return null;
-  return <div className="mechanics">{lines}</div>;
+  if (!lines.length && !dice.length) return null;
+  return (
+    <>
+      {dice.length > 0 && <div className="dice-tray">{dice}</div>}
+      {lines.length > 0 && <div className="mechanics">{lines}</div>}
+    </>
+  );
 }
 
 function Clarify({ c, onAnswer }: { c: Clarification; onAnswer: (a: string) => void }) {
@@ -408,18 +470,25 @@ function Clarify({ c, onAnswer }: { c: Clarification; onAnswer: (a: string) => v
 function Composer({
   busy,
   others,
+  partyIds,
   onSend,
 }: {
   busy: boolean;
   others: Participant[];
-  onSend: (text: string, channel: Channel, targets: Participant[]) => void;
+  partyIds: string[];
+  onSend: (text: string, channel: Channel, targets: Participant[]) => void | Promise<void>;
 }) {
   const [text, setText] = useState("");
   const [channel, setChannel] = useState<Channel>("auto");
-  const [target, setTarget] = useState<string>("");
+  const [picked, setPicked] = useState<string[]>([]);
   const ref = useRef<HTMLTextAreaElement>(null);
-  const whisperTarget = others.find((o) => o.actor_id === target);
-  const needsTarget = channel === "whisper" && !whisperTarget;
+  const present = others.filter((o) => o.actor_id);
+  const targets = present.filter((o) => picked.includes(o.actor_id as string));
+  const partyHere = present.filter((o) => partyIds.includes(o.actor_id as string));
+  const allParty = partyHere.length > 0 && partyHere.every((p) => picked.includes(p.actor_id as string));
+  // whispers need someone to whisper to; speech may name who it is for (heard by all)
+  const needsTarget = channel === "whisper" && targets.length === 0;
+  const picking = channel === "whisper" || channel === "say";
 
   useEffect(() => {
     const el = ref.current;
@@ -427,11 +496,25 @@ function Composer({
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [text]);
+  // someone who left the scene cannot stay picked
+  useEffect(() => {
+    setPicked((p) => p.filter((id) => present.some((o) => o.actor_id === id)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [others]);
+
+  const toggle = (id: string) =>
+    setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+  const toggleParty = () =>
+    setPicked((p) =>
+      allParty
+        ? p.filter((id) => !partyIds.includes(id))
+        : [...new Set([...p, ...partyHere.map((x) => x.actor_id as string)])],
+    );
 
   const submit = () => {
     const t = text.trim();
     if (!t || busy || needsTarget) return;
-    onSend(t, channel, channel === "whisper" && whisperTarget ? [whisperTarget] : []);
+    void onSend(t, channel, picking ? targets : []);
     setText("");
   };
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -440,7 +523,12 @@ function Composer({
       submit();
     }
   };
-  const hint = CHANNELS.find((c) => c.id === channel)?.hint ?? "";
+  const hint =
+    channel === "say" && targets.length
+      ? `Said aloud to ${targets.map((t) => t.known_as).join(", ")} (everyone present hears)`
+      : channel === "whisper" && targets.length
+        ? `Only ${targets.map((t) => t.known_as).join(", ")} will hear`
+        : CHANNELS.find((c) => c.id === channel)?.hint ?? "";
   return (
     <form
       className="composer"
@@ -456,26 +544,39 @@ function Composer({
               key={c.id}
               type="button"
               aria-pressed={channel === c.id}
-              onClick={() => setChannel(c.id)}
+              onClick={() => {
+                if (c.id !== channel) setPicked([]); // listeners belong to one way of speaking
+                setChannel(c.id);
+              }}
               title={c.hint}
             >
               {c.label}
             </button>
           ))}
         </div>
-        {channel === "whisper" && (
-          <select
-            aria-label="Whisper to"
-            value={target}
-            onChange={(e) => setTarget(e.target.value)}
+        {picking && present.length > 0 && (
+          <div
+            className="channels listeners"
+            role="group"
+            aria-label={channel === "whisper" ? "Whisper to" : "Speak to"}
           >
-            <option value="">Whisper to…</option>
-            {others.map((o) => (
-              <option key={o.actor_id ?? o.entity_id} value={o.actor_id ?? ""}>
+            <span className="muted small">{channel === "whisper" ? "Whisper to" : "To"}</span>
+            {partyHere.length > 1 && (
+              <button type="button" aria-pressed={allParty} onClick={toggleParty}>
+                Party
+              </button>
+            )}
+            {present.map((o) => (
+              <button
+                key={o.actor_id}
+                type="button"
+                aria-pressed={picked.includes(o.actor_id as string)}
+                onClick={() => toggle(o.actor_id as string)}
+              >
                 {o.known_as}
-              </option>
+              </button>
             ))}
-          </select>
+          </div>
         )}
         <div className="input-row">
           <textarea

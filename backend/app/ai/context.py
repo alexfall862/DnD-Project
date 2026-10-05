@@ -30,11 +30,13 @@ from app.services.memory import MemoryService
 from app.services.perspective import PerspectiveService
 from app.services.world import CampaignHandle
 
+# total budget per call (context + output). A9 serves a 32k window; these keep prompts lean
+# for latency while leaving room for the larger output caps (play session 2026-10-05)
 PROFILE_BUDGET_TOKENS = {
-    "fast_structured": 4000,
-    "balanced_reasoning": 8000,
-    "creative_narrative": 8000,
-    "deep_world_author": 12000,
+    "fast_structured": 6000,
+    "balanced_reasoning": 10000,
+    "creative_narrative": 10000,
+    "deep_world_author": 14000,
 }
 SECTION_ORDER = (
     "identity",
@@ -48,6 +50,7 @@ SECTION_ORDER = (
     "beliefs",
     "inventory_public",
     "memories",
+    "recent_turns",
     "scene",
     "heard_claims",
     "observations",

@@ -159,6 +159,41 @@ class IntentInterpreterOut(Lenient):
     conveys: list[ConveysItemOut] = Field(default_factory=list)
     asserted_facts: list[AssertedFactOut] = Field(default_factory=list)
     conversation_time_band: Literal["brief", "normal", "long", "extended", "none"] = "none"
+    # the exact words the character says aloud, when the player describes speech instead of
+    # quoting it ("I want to ask him where he's from" -> "Where are you coming from?")
+    utterance: str | None = None
+
+
+class MaterializedGoalOut(Lenient):
+    description: str = Field(min_length=1)
+    priority: int = Field(default=50, ge=1, le=100)
+
+
+class MaterializedMemoryOut(Lenient):
+    summary: str = Field(min_length=1)
+    salience: float = Field(default=0.6, ge=0, le=1)
+
+
+class AttitudeOut(Lenient):
+    trust: int = Field(default=30, ge=0, le=100)
+    respect: int = Field(default=30, ge=0, le=100)
+    affection: int = Field(default=10, ge=0, le=100)
+    fear: int = Field(default=0, ge=0, le=100)
+    resentment: int = Field(default=0, ge=0, le=100)
+    familiarity: int = Field(default=10, ge=0, le=100)
+
+
+class NPCMaterializerOut(Lenient):
+    """A background extra made into a living character: psychology and the memory of what
+    they witnessed. No world facts: what they claim stays a claim."""
+
+    summary: str = Field(min_length=1, max_length=400)
+    occupation: str = ""
+    temperament: str = ""
+    dimensions: dict[str, float] = Field(default_factory=dict)
+    goals: list[MaterializedGoalOut] = Field(default_factory=list, max_length=3)
+    attitude_to_party: AttitudeOut = Field(default_factory=AttitudeOut)
+    memories: list[MaterializedMemoryOut] = Field(default_factory=list, max_length=5)
 
 
 class IncidentalDetailOut(Lenient):
@@ -191,6 +226,8 @@ class RulesAdjudicatorOut(Lenient):
     precedent_tags: list[str] = Field(default_factory=list)
     scope: Literal["single_use", "scene", "campaign"] = "single_use"
     summary: str = ""
+    # what is at stake, in the player's terms: {"success": ..., "failure": ..., "retry": ...}
+    stakes: dict[str, str] = Field(default_factory=dict)
 
 
 class MemoryCandidateOut(Lenient):
@@ -286,6 +323,9 @@ ACTOR_CONTEXT = frozenset(
         "available_actions",
         "situation",
         "rules_public",
+        # built from this actor's own perspective (build_candidates): the refs it may target.
+        # Missing until 2026-10-05, so the interpreter and AI actors guessed every ref.
+        "candidates",
     }
 )
 OBJECTIVE = frozenset(
@@ -300,10 +340,10 @@ ROLES: dict[str, RoleSpec] = {
             "fast_structured",
             "intent_interpreter",
             IntentInterpreterOut,
-            320,
+            1024,
             0.2,
             True,
-            ACTOR_CONTEXT - {"memories"},
+            (ACTOR_CONTEXT - {"memories"}) | {"recent_turns"},
             OBJECTIVE,
             frozenset({"intent"}),
         ),
@@ -312,7 +352,7 @@ ROLES: dict[str, RoleSpec] = {
             "fast_structured",
             "entity_resolver",
             EntityResolverOut,
-            120,
+            300,
             0.1,
             True,
             frozenset({"candidates", "situation"}),
@@ -324,7 +364,7 @@ ROLES: dict[str, RoleSpec] = {
             "balanced_reasoning",
             "ai_player",
             AIPlayerOut,
-            400,
+            900,
             0.6,
             True,
             ACTOR_CONTEXT,
@@ -336,7 +376,7 @@ ROLES: dict[str, RoleSpec] = {
             "balanced_reasoning",
             "npc_actor",
             NPCActorOut,
-            400,
+            900,
             0.6,
             True,
             ACTOR_CONTEXT,
@@ -348,7 +388,7 @@ ROLES: dict[str, RoleSpec] = {
             "fast_structured",
             "npc_tactical",
             IntentionOut,
-            120,
+            300,
             0.3,
             True,
             frozenset({"mechanics_player_layer", "available_actions", "situation"}),
@@ -360,7 +400,7 @@ ROLES: dict[str, RoleSpec] = {
             "balanced_reasoning",
             "rules_adjudicator",
             RulesAdjudicatorOut,
-            320,
+            900,
             0.2,
             False,
             frozenset({"rules_public", "situation", "scene", "mechanics_player_layer"}),
@@ -372,7 +412,7 @@ ROLES: dict[str, RoleSpec] = {
             "creative_narrative",
             "narrator",
             None,  # prose: streamed verbatim; decoration is extracted by the canon pass
-            320,
+            700,
             0.8,
             True,
             frozenset(
@@ -383,6 +423,7 @@ ROLES: dict[str, RoleSpec] = {
                     "style",
                     "resolved_mechanics",
                     "situation",
+                    "recent_turns",
                 }
             ),
             OBJECTIVE | {"beliefs", "memories"},
@@ -395,7 +436,7 @@ ROLES: dict[str, RoleSpec] = {
             "fast_structured",
             "claim_extractor",
             ClaimExtractorOut,
-            200,
+            700,
             0.1,
             True,
             frozenset({"situation", "candidates"}),
@@ -407,7 +448,7 @@ ROLES: dict[str, RoleSpec] = {
             "fast_structured",
             "canon_extractor",
             CanonExtractorOut,
-            200,
+            500,
             0.2,
             True,
             frozenset({"situation", "scene"}),
@@ -419,7 +460,7 @@ ROLES: dict[str, RoleSpec] = {
             "fast_structured",
             "memory_processor",
             MemoryProcessorOut,
-            200,
+            700,
             0.4,
             True,
             frozenset(
@@ -441,7 +482,7 @@ ROLES: dict[str, RoleSpec] = {
             "fast_structured",
             "belief_processor",
             BeliefProcessorOut,
-            160,
+            400,
             0.3,
             True,
             frozenset({"beliefs", "relationships_own", "situation"}),
@@ -453,7 +494,7 @@ ROLES: dict[str, RoleSpec] = {
             "fast_structured",
             "journal_writer",
             JournalWriterOut,
-            300,
+            700,
             0.5,
             True,
             frozenset({"observations", "heard_claims", "beliefs", "scene"}),
@@ -461,11 +502,56 @@ ROLES: dict[str, RoleSpec] = {
             frozenset(),
         ),
         RoleSpec(
+            "table_assistant",
+            "fast_structured",
+            "table_assistant",
+            None,  # prose: an answer to the player, out of character
+            600,
+            0.3,
+            True,
+            frozenset(
+                {
+                    "identity",
+                    "known_entities",
+                    "mechanics_player_layer",
+                    "beliefs",
+                    "heard_claims",
+                    "observations",
+                    "scene",
+                    "inventory_public",
+                    "goals_own",
+                    "relationships_own",
+                    "memories",
+                    "core_memories",
+                    "rules_public",
+                    "recent_turns",
+                    "situation",
+                }
+            ),
+            OBJECTIVE,
+            frozenset(),
+            repair=False,
+            notes="OOC questions answered from the focus character's perspective only",
+        ),
+        RoleSpec(
+            "npc_materializer",
+            "balanced_reasoning",
+            "npc_materializer",
+            NPCMaterializerOut,
+            900,
+            0.6,
+            False,
+            frozenset({"person", "witnessed", "scene", "task"}),
+            OBJECTIVE,
+            frozenset({"npc_profile"}),
+            notes="promotes a background extra; psychology and witnessed memory, never facts",
+        ),
+        RoleSpec(
             "brief_interviewer",
             "fast_structured",
             "brief_interviewer",
             BriefInterviewOut,
-            350,
+            600,
             0.5,
             False,
             frozenset({"brief", "conversation", "task"}),
@@ -491,7 +577,7 @@ ROLES: dict[str, RoleSpec] = {
             "balanced_reasoning",
             "world_simulator",
             WorldSimulatorOut,
-            600,
+            900,
             0.5,
             False,
             frozenset(

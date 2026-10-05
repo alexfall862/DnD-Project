@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # application
     app_env: Literal["development", "test", "production"] = "development"
     debug_mode: bool = True
+    # dice: 'manual' pauses a called-for check until the player rolls; 'auto' rolls at once.
+    # Per campaign in settings.dice_mode; this is the default (tests run with 'auto').
+    dice_mode_default: str = "manual"
     log_level: str = "INFO"
     engine_version: str = "0.1.0-dev"
     default_ruleset: str = "core_adventure"

@@ -208,3 +208,130 @@ async def test_the_feed_is_kept_on_the_server_for_the_player_who_saw_it(
     assert len((await client.get(f"{API}/characters/{alex}/feed", params={"limit": 1})).json()) == 1
     # an AI companion's feed is not the player's to read
     assert (await client.get(f"{API}/characters/{w['actors']['Elara']}/feed")).status_code == 403
+
+
+async def _stream(client, url: str, body: dict) -> list[tuple[str, dict]]:
+    import json as _json
+
+    events: list[tuple[str, dict]] = []
+    async with client.stream("POST", url, json=body, headers={"Accept": "text/event-stream"}) as r:
+        name = None
+        async for line in r.aiter_lines():
+            if line.startswith("event:"):
+                name = line[6:].strip()
+            elif line.startswith("data:") and name:
+                events.append((name, _json.loads(line[5:])))
+    return events
+
+
+async def test_the_turn_stream_reports_stages_and_each_model_call(
+    app,
+    client,
+    fixtures,  # noqa: F811
+) -> None:
+    """Play session 2026-10-05: the player could not tell what a slow turn was doing. The
+    stream now carries stages and every model call's start and finish, with the run id that
+    opens what was sent."""
+    w = await seed(client, "tavern")
+    cid, alex = w["campaign_id"], w["actors"]["Alex"]
+    events = await _stream(
+        client,
+        f"{API}/campaigns/{cid}/play",
+        {"actor_id": alex, "text": "I look under the lantern on the tables."},
+    )
+    names = [n for n, _ in events]
+    stages = [p["stage"] for n, p in events if n == "stage"]
+    assert stages[:2] == ["interpreting", "resolving"] and "narrating" in stages
+    calls = [p for n, p in events if n == "model_call"]
+    started = [c for c in calls if c["phase"] == "started"]
+    finished = [c for c in calls if c["phase"] == "finished"]
+    assert started and started[0]["role"] == "intent_interpreter"
+    assert started[0]["context_snapshot_id"] and started[0]["max_tokens"] >= 1000
+    assert {c["run_id"] for c in started} == {c["run_id"] for c in finished}
+    assert names.index("accepted") < names.index("model_call") < names.index("result")
+    ctx = await client.get(f"{API}/debug/model-runs/{started[0]['run_id']}/context")
+    assert ctx.status_code == 200  # "what was sent" opens while the turn is still running
+
+
+async def test_a_failed_turn_keeps_its_audit_and_history(app, client, fixtures) -> None:  # noqa: F811
+    """Play session 2026-10-05: a failing turn rolled back the record of the calls it made.
+    The world change rolls back; the model runs, the feed entry and the trace stay. (An
+    unparseable interpretation no longer fails a turn, so the failure here is a ruling call
+    that blows up.)"""
+    w = await seed(client, "tavern")
+    cid, alex = w["campaign_id"], w["actors"]["Alex"]
+    fixtures.replace(
+        "intent_interpreter",
+        lambda req: {
+            "channel": "do",
+            "confidence": 0.9,
+            "intents": [{"order": 1, "action_type": "other", "target_ref": None}],
+        },
+    )
+
+    def explode(req):
+        raise RuntimeError("adjudicator crashed")
+
+    fixtures.replace("rules_adjudicator", explode)
+    events = await _stream(
+        client,
+        f"{API}/campaigns/{cid}/play",
+        {"actor_id": alex, "text": "I juggle the tankards."},
+    )
+    errors = [p for n, p in events if n == "error"]
+    assert errors and errors[-1]["code"] == "INTERNAL_ERROR"
+    feed = (await client.get(f"{API}/characters/{alex}/feed")).json()
+    last = feed[-1]
+    assert last["input"]["text"] == "I juggle the tankards." and "error" in last["result"]
+    trace = (await client.get(f"{API}/debug/turns/{last['turn_id']}")).json()
+    runs = {m["role"]: m["status"] for m in trace["model_runs"]}
+    assert runs.get("intent_interpreter") == "ok" and runs.get("rules_adjudicator") == "failed"
+
+
+async def test_a_whisper_can_go_to_several_listeners(app, client, fixtures) -> None:  # noqa: F811
+    """Play session 2026-10-05: whispers were one-to-one in the UI. The API takes several
+    targets: each of them hears it, nobody else does."""
+    from sqlalchemy import select as _select
+
+    from app.persistence.models import TranscriptMessage, TranscriptRecipient
+
+    w = await seed(client, "tavern")
+    cid, alex = w["campaign_id"], w["actors"]["Alex"]
+    party = [w["actors"]["Elara"], w["actors"]["Tomas"]]
+    r = await client.post(
+        f"{API}/campaigns/{cid}/play",
+        json={
+            "actor_id": alex,
+            "text": "keep this between us: Mira knows more than she says",
+            "channel": "whisper",
+            "target_actor_ids": party,
+        },
+    )
+    assert r.status_code == 200, r.text
+
+    async with app.state.session_factory() as s:
+        msg = (
+            (
+                await s.execute(
+                    _select(TranscriptMessage)
+                    .where(
+                        TranscriptMessage.speaker_actor_id == uuid.UUID(alex),
+                        TranscriptMessage.channel == "whisper",
+                    )
+                    .order_by(TranscriptMessage.created_at.desc())
+                )
+            )
+            .scalars()
+            .first()
+        )
+        heard = {
+            str(x.actor_id)
+            for x in (
+                await s.execute(
+                    _select(TranscriptRecipient).where(TranscriptRecipient.message_id == msg.id)
+                )
+            ).scalars()
+        }
+    assert set(party) <= heard and w["actors"]["Mira"] not in heard
+    feed = (await client.get(f"{API}/characters/{alex}/feed")).json()
+    assert sorted(feed[-1]["input"]["to"]) == ["Elara", "Tomas"]

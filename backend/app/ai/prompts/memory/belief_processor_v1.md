@@ -4,7 +4,7 @@ version: 1
 role: belief_processor
 authority: [belief_adjust]
 schema: BeliefProcessorOut
-max_tokens: 160
+max_tokens: 400
 restrictions: [adjust within ±0.25, inference only, never known]
 ---
 Role: Belief Processor. The engine has already computed a default belief from a statement or

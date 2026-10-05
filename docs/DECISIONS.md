@@ -761,6 +761,78 @@ Milestone 11 (stress) with per-actor partitioning or iterative index scans if ne
 - **Eval fix:** the slice's "conveyed a fact not held" check skips document claims, since a
   read document speaks for its author (Oric's ledger).
 
+### Play-session fixes (10c) — implementation decisions (2026-10-05)
+
+A browser play session at the Frostbridge gate showed failures the scripted tests could not:
+the merchant was voiced by the narrator, deals were forgotten, talk turned into d20 rolls,
+long inputs failed, OOC did nothing, and nothing showed a turn's progress. Fixes:
+
+- **Output caps sized to GLM.** The interpreter was capped at 320 output tokens; a one-paragraph
+  input needs 400–600 tokens of JSON, so it was cut off and either repaired (a second call) or
+  failed. New caps: interpreter 1024; adjudicator, NPC actor and AI player 900; narrator 700;
+  claim extractor 700. Profile budgets were raised so that larger caps do not squeeze context
+  (fast 6000, balanced and creative 10000, deep 14000). The interpreter now writes compact JSON
+  with at most 4 intents, 3 conveys and 2 asserted facts.
+- **Bug fixed: the candidate list never reached actor-scoped roles.** "candidates" was missing
+  from the actor context sections, so the interpreter, NPC actors and AI players never saw the
+  refs they had to target, and guessed them ("Warehouse District", "the_bar_owner"). The
+  candidates are built from each actor's own perspective, so they are safe to show.
+- **Live turn diagnostics.**
+  - The turn stream carries `stage` events and `model_call` events (started, waiting, retry,
+    finished, with the run id).
+  - A started call links to its context snapshot ("what was sent") while the turn is still
+    running. A9 busy, not-loaded and queued waits are reported by the provider.
+  - The in-flight turn lives in an app-level store, so switching views no longer loses it.
+  - A failed turn keeps its audit: model runs, contexts and decision traces are read back
+    inside the transaction and written again after the rollback. It also gets a feed entry
+    with its turn id.
+  - Engine notes ("You attempt.", policy refusals, ruling errors) moved to `dev_notes`, shown
+    only in dev view.
+- **Interpretation.**
+  - A closed action list, with server-side synonyms and leading-word matching. An unknown
+    action word in speech is speech.
+  - Social actions (persuade, deceive, intimidate, bribe, perform) are spoken to the target and
+    resolved by the engine with the matching skill against a moderate difficulty, with no
+    ruling call. The listener is told how convincing it was and decides in character.
+  - An unparseable interpretation no longer fails the turn: quoted input is spoken, a
+    described deed is ruled on as one attempt.
+  - Actor targets come from the player's words when the model's ref matches nobody.
+  - Rolls are named after their skill, not "improvised".
+- **Living NPCs and continuity.**
+  - A scripted extra engaged twice in a scene (addressed, persuaded, threatened or attacked)
+    becomes a living character before reactions, so they answer that turn.
+  - One `npc_materializer` call writes their psychology (goals, temperament, dimensions,
+    attitude to the party) and their memories of the scene. Those memories come from the
+    feed's public lines, minus whispers and private lines they could not hear.
+  - The promotion is applied through services as an `actor.promoted` event plus the controller
+    switch. No world facts are created. If the call fails, a plain profile and the witnessed
+    lines are used.
+  - The narrator and interpreter receive "this scene so far" from the focus player's own feed.
+  - The narrator may quote only words actually spoken this turn; a dev note flags any quote
+    nobody said.
+- **OOC is a table assistant.** A model call answers from the focus character's perspective
+  (knowledge, observations, inventory, memories, public rules, scene so far). It writes no
+  events.
+- **Dice.** Per campaign, `dice_mode` is `manual` (the default) or `auto`; tests run with
+  `DICE_MODE_DEFAULT=auto`.
+  - In manual mode, a social check or a ruled check pauses the turn before anything happens. A
+    `pending_rolls` row (migration 0017) stores the interpretation, the ruling and previews.
+  - The previews use the engine's own arithmetic, without rolling: die, bonus, DC, and stakes
+    (social templates, or the adjudicator's new `stakes` field).
+  - Rolling resumes the stored turn without re-interpreting, and the engine's dice roll at that
+    moment. Reconsider changes nothing; an unanswered request lapses on the next input.
+  - Visible rolls carry the natural die, DC, success and degree. A roll is paired with its
+    actor's `check.rolled` event when its row is attached to the action's final event.
+  - Dev view's roll certificate (`GET /debug/rolls/{id}`) replays the stored seed through the
+    engine's dice function and shows the same dice. Timestamps could not serve as proof: in
+    one transaction the roll and the model calls share a time.
+  - Attacks and searches roll at once but render as dice too.
+- **Addressing.** Whisper takes several listeners, with a one-tap Party chip. Say can name who
+  it is for: everyone present hears, and the named people answer first. Picks clear when the
+  channel changes.
+- The shared test fake for the interpreter matches only the player's input line, since the
+  context now repeats earlier inputs in the scene log.
+
 ### Pending
 - **2026-10-03, later:** A9 was updated after the spike. The project now serves **GLM-4.5-Air**
   as `ttrpg/local-general` (explicit model name; A9 never substitutes; 409 = not loaded, wait

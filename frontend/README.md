@@ -32,8 +32,18 @@ Everything outside dev view comes from normal, perspective-safe endpoints:
 - The play feed shows each turn as the player's line, then mechanics (actions, visible rolls,
   state changes), then speaker-labelled speech, then streamed narration.
 - Speakers are named as the focus character knows them, so a stranger stays "a man you have not met".
-- The composer has Auto, Do, Say, Whisper (with a listener picker), Private and OOC channels.
-  Clarification questions appear inline with their candidates.
+- The composer has Auto, Do, Say, Whisper, Private and OOC channels.
+  - Whisper takes one or several listeners, or the whole party in one tap.
+  - Say can name who it is for: everyone present hears, and they answer first.
+  - Clarification questions appear inline with their candidates.
+- **Dice.** When the game calls for a check, the turn pauses on a card showing the skill, the
+  number to reach, your bonus, and what success, failure and a retry would mean. You pick a
+  die style, click Roll and watch it land, or Reconsider. Settings can switch to Auto-roll.
+  The engine rolls the dice either way, never the storyteller.
+- **OOC** asks the table: rules, or what your character knows or sees, answered from your
+  character's perspective. Nothing happens in the world.
+- While a turn runs, a status line shows what it is doing and for how long, whatever view you
+  are on.
 - Character shows the sheet and inventory. Party shows who is with you; someone elsewhere is only "away".
 - Journal, Encyclopedia ("what you know or suspect") and World (scene and beliefs) are per-character.
 - Settings holds the theme (this device) and narration style, companion reactions and spectator mode (the campaign).
@@ -47,6 +57,12 @@ switch.
 The **DEV** switch appears only when the server runs with `DEBUG_MODE=true`. It is remembered
 per browser and can be flipped mid-play. With it on:
 
+- a turn in flight shows a live timeline: when the request was sent and accepted, each
+  stage, and every model call as it starts, waits on A9 (busy, not loaded, queued), retries
+  and finishes, with "what was sent" for each;
+- every roll has an "engine dice" chip whose certificate replays the stored seed through the
+  engine and shows the same dice;
+- failed turns keep their trace;
 - each turn shows its latency and model-call count, plus a **Trace** (actions, resolution,
   rolls including hidden ones, events, model calls with their full context);
 - a **Debug** view adds turn metrics, the event ledger, objective facts, a perspective

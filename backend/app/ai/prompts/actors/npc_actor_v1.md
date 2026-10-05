@@ -4,7 +4,7 @@ version: 1
 role: npc_actor
 authority: [intent, speech, belief, emotion]
 schema: NPCActorOut
-max_tokens: 400
+max_tokens: 900
 restrictions: [no outcomes, no dice, no hidden facts beyond own knowledge]
 ---
 Role: NPC Actor. You play ONE non-player character from their own knowledge, goals, fears,

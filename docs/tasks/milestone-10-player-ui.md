@@ -64,3 +64,29 @@ words. Follow-ups (10b), also done:
 
 Backlog: claim-extraction latency on speech turns, and a location descriptor for unnamed places
 (the strip says "Somewhere unfamiliar").
+
+### Play-session fixes (10c) — done 2026-10-05
+
+A browser play session at the Frostbridge gate led to these fixes (`DECISIONS.md`, "Play-session
+fixes (10c)"):
+
+- live turn status, with a dev timeline of every model call and a link to what was sent;
+- failed turns keep their trace;
+- larger output caps, and the candidate list now reaches the interpreter and actors;
+- a closed action list, and social actions rolled with real skills;
+- no failed turns on unparseable output;
+- living NPCs promoted on the second engagement, remembering the scene;
+- the scene so far for the narrator and interpreter;
+- OOC as a table assistant;
+- click-to-roll dice with stakes, die styles, auto-roll and a dev certificate;
+- whispers to several people or the party, and Say naming who it is for.
+
+Tests:
+
+| Area | Where |
+|---|---|
+| Backend | `test_dice.py` (3), `test_npc_promotion.py`, and new cases in `test_player_api.py`, `test_ai_actors.py`, `test_orchestrator.py` and the unit tests |
+| Vitest | 10 |
+| Playwright | 15: desktop, phone and Frostbridge, now including dice, live status and group whispers |
+
+`tests/eval/test_session_replay_a9.py` replays the session's own lines on A9.

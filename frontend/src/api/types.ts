@@ -127,6 +127,8 @@ export interface PlayRequestBody {
   channel: Channel;
   target_actor_ids?: Uuid[];
   clarification_id?: Uuid;
+  roll_request_id?: Uuid;
+  roll_decision?: "roll" | "reconsider";
 }
 
 export interface SpeakerLine {
@@ -137,11 +139,35 @@ export interface SpeakerLine {
 }
 
 export interface VisibleRoll {
+  id?: string;
   expression: string;
   raw: unknown;
+  natural?: number | null;
   modifier: number;
   total: number;
   purpose: string;
+  dc?: number | null;
+  success?: boolean | null;
+  degree?: string | null;
+  source?: string;
+}
+
+export interface RollCheck {
+  label: string;
+  kind: string;
+  target_known_as: string | null;
+  die: string;
+  bonus: number;
+  dc: number;
+  attribute: string | null;
+  skill: string | null;
+  stakes: { success: string; failure: string; retry?: string };
+}
+
+export interface RollRequest {
+  id: Uuid;
+  checks: RollCheck[];
+  prompt: string;
 }
 
 export interface ActionResult {
@@ -186,6 +212,8 @@ export interface PlayResult {
   needs_player_input: boolean;
   metrics: TurnMetricsView;
   ooc: string | null;
+  dev_notes?: string[];
+  roll_request?: RollRequest | null;
 }
 
 export interface Clarification {

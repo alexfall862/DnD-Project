@@ -600,6 +600,19 @@ class CampaignStarted(EventPayload):
     player_actor_id: uuid.UUID | None = None
 
 
+class ActorPromoted(EventPayload):
+    """A background extra became a living character (play session 2026-10-05): the new
+    behavior profile, why, and how much of their history they were given."""
+
+    event_type: ClassVar[str] = "actor.promoted"
+    actor_id: uuid.UUID
+    reason: str
+    behavior_profile: dict[str, Any] = Field(default_factory=dict)
+    goals: int = 0
+    memories: int = 0
+    model_run_id: uuid.UUID | None = None
+
+
 class SettingsChanged(EventPayload):
     """A player-facing tunable changed (api-contracts §5 PATCH; design-iteration §5). Settings
     never rewrite world truth; the event records what changed and from what."""
@@ -707,6 +720,7 @@ PAYLOAD_TYPES: dict[str, type[EventPayload]] = {
         LocationMaterialized,
         CampaignStarted,
         SettingsChanged,
+        ActorPromoted,
     )
 }
 

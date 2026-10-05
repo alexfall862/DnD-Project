@@ -95,6 +95,8 @@ class Happenings:
     claim_entities: set[uuid.UUID] = field(default_factory=set)
     attacked: set[uuid.UUID] = field(default_factory=set)
     speech_results: list[SpeechResult] = field(default_factory=list)
+    # social attempts aimed at an actor this turn: actor id -> (label, convincing?, margin)
+    social: dict[uuid.UUID, tuple[str, bool, int]] = field(default_factory=dict)
 
     def note_speech(self, r: SpeechResult, targets: list[uuid.UUID]) -> None:
         self.speech_results.append(r)

@@ -19,11 +19,11 @@ async function turn(page: Page, text: string) {
 
 async function whisper(page: Page, to: RegExp, text: string) {
   await page.getByRole("button", { name: "Whisper", exact: true }).click();
-  const select = page.getByLabel("Whisper to");
-  const options = await select.locator("option").allTextContents();
-  const label = options.find((o) => to.test(o));
-  expect(label, `a whisper target matching ${to} among ${options.join(", ")}`).toBeTruthy();
-  await select.selectOption({ label: label! });
+  const group = page.getByRole("group", { name: "Whisper to" });
+  const names = await group.getByRole("button").allTextContents();
+  const label = names.find((o) => o !== "Party" && to.test(o));
+  expect(label, `a whisper target matching ${to} among ${names.join(", ")}`).toBeTruthy();
+  await group.getByRole("button", { name: label!, exact: true }).click();
   const t = await turn(page, text);
   await page.getByRole("button", { name: "Auto", exact: true }).click();
   return t;
@@ -59,6 +59,10 @@ test("the Frostbridge scenario is playable from the browser", async ({ page }) =
   await expect(t.locator(".speech q").first()).toContainText("argued");
 
   // 4. a private whisper to Elara; 5. Tomas on the captain
+  // the whole party is one tap away when whispering (here only Elara is chosen)
+  await page.getByRole("button", { name: "Whisper", exact: true }).click();
+  await expect(page.getByRole("group", { name: "Whisper to" }).getByRole("button", { name: "Party" })).toBeVisible();
+  await page.getByRole("button", { name: "Auto", exact: true }).click();
   t = await whisper(page, /Elara/, "I think the innkeeper had something to do with his disappearance.");
   await expect(t.locator(".player-line")).toContainText("whisper → Elara");
   await turn(page, "Tomas, what do you make of the captain?");

@@ -42,6 +42,12 @@ def script(fake) -> None:
                     ],
                     band="brief",
                 ),
+                "let me in on it": intent(
+                    "say",
+                    intents=[("persuade", "mira", None)],
+                    targets=["mira"],
+                    band="brief",
+                ),
                 "keep this between us": intent(
                     "whisper",
                     intents=[("whisper", "elara", None)],
@@ -92,6 +98,8 @@ def build():
             # one visible reaction per turn, as the slice runs it: reactions run concurrently,
             # so two would make who acts first (and the script) depend on timing
             "spotlight_visible_reactions": 1,
+            # the browser plays with click-to-roll unless a test asks otherwise
+            "dice_mode_default": os.environ.get("E2E_DICE_MODE", "manual"),
         }
     )
     command.upgrade(alembic_config(settings.database_url), "head")
@@ -107,6 +115,8 @@ def build():
 
             return make_fake(Script())
         fake = plain(*args, **kwargs)
+        # slow enough that a browser can watch a turn in flight (live status, navigation)
+        fake.latency_ms = int(os.environ.get("E2E_LATENCY_MS", "400"))
         script(fake)
         return fake
 

@@ -4,7 +4,7 @@ version: 1
 role: canon_extractor
 authority: [decoration]
 schema: CanonExtractorOut
-max_tokens: 200
+max_tokens: 500
 restrictions: [decoration only, present entities only, no claims as facts]
 ---
 Role: Canon Extractor. From the narration, list concrete incidental details that could persist

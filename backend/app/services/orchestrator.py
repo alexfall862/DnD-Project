@@ -62,7 +62,14 @@ from app.services.scenes import SceneService
 from app.services.simulation import SimulationService
 from app.services.speech import ConveysItem, LeakageError, SpeechService
 from app.services.turns import Turn, budget_from_settings
-from app.services.vocab import ACTION_MAP, FREE_TYPES, READ_TYPES, SPEECH_TYPES
+from app.services.vocab import (
+    ACTION_MAP,
+    FREE_TYPES,
+    READ_TYPES,
+    SOCIAL_SKILLS,
+    SPEECH_TYPES,
+    canonical_kind,
+)
 from app.services.world import CampaignHandle, WorldError, WorldService
 
 Channel = Literal["auto", "do", "say", "whisper", "private", "ooc"]
@@ -117,6 +124,8 @@ class PlayRequest:
     known_world_version: int | None = None
     known_scene_version: int | None = None
     clarification_id: uuid.UUID | None = None
+    roll_request_id: uuid.UUID | None = None  # answering a called-for check
+    roll_decision: str | None = None  # "roll" | "reconsider"
 
 
 @dataclass
@@ -135,6 +144,35 @@ class PlayResult:
     metrics: dict[str, Any] = field(default_factory=dict)
     ooc: str | None = None
     channel: str = "auto"
+    # engine notes for dev view only: rulings, policy decisions, generic observation lines
+    # (play session 2026-10-05: "no adjudicator available" and "You attempt." reached the player)
+    dev_notes: list[str] = field(default_factory=list)
+    # a check the game called for, waiting on the player (manual dice): see PendingRoll
+    roll_request: dict[str, Any] | None = None
+
+
+def _natural(raw: Any) -> int | None:
+    """The face the die showed (single-die rolls); None for pools."""
+    nums: list[int] = []
+
+    def walk(x: Any) -> None:
+        if isinstance(x, bool):
+            return
+        if isinstance(x, int):
+            nums.append(x)
+        elif isinstance(x, (list, tuple)):
+            for y in x:
+                walk(y)
+        elif isinstance(x, dict):
+            for k in ("dice", "rolls", "values", "kept", "faces"):
+                if k in x:
+                    walk(x[k])
+                    return
+            for y in x.values():
+                walk(y)
+
+    walk(raw)
+    return nums[0] if len(nums) == 1 else None
 
 
 def narration_outcomes(result: PlayResult) -> list[str]:
@@ -161,13 +199,58 @@ def narration_outcomes(result: PlayResult) -> list[str]:
         elif status:
             out.append(f"{label}: {status}")
     if not result.actions and any(
-        n.startswith("(OOC) ruling rejected") for n in result.mechanical_notices
+        n.startswith("(OOC) ruling rejected")
+        for n in [*result.mechanical_notices, *result.dev_notes]
     ):
         out.append(
             "your attempt had no effect at all; describe only what you observe, never the attempt "
             "succeeding or revealing anything"
         )
     return out
+
+
+GENERIC_NOTICES = {"You attempt.", "You say something.", "You whisper something."}
+
+SOCIAL_STAKES = {
+    "persuade": {
+        "success": "They are inclined to go along with you.",
+        "failure": "They are unmoved, and may be warier of you.",
+        "retry": "You can try again with a better offer or a different approach.",
+    },
+    "deceive": {
+        "success": "They believe you, for now.",
+        "failure": "They doubt you, and may remember the lie.",
+        "retry": "The same lie will not land twice.",
+    },
+    "intimidate": {
+        "success": "They back down or give ground.",
+        "failure": "They hold firm, and may resent it or tell someone.",
+        "retry": "Pushing harder risks a fight.",
+    },
+    "bribe": {
+        "success": "They take the money and help.",
+        "failure": "They refuse, perhaps loudly.",
+        "retry": "A bigger offer might work, or might insult them.",
+    },
+    "perform": {
+        "success": "You hold the room.",
+        "failure": "It falls flat.",
+        "retry": "Read the room and try something else.",
+    },
+}
+
+
+def roll_prompt(checks: list[dict[str, Any]]) -> str:
+    """How the table asks for the roll, from the engine's own numbers (never the model's)."""
+    parts = []
+    for c in checks:
+        who = f" with {c['target_known_as']}" if c.get("target_known_as") else ""
+        bonus = c.get("bonus", 0)
+        parts.append(
+            f"This calls for a {c['label']} check{who}: {c['die']} "
+            f"{'+' if bonus >= 0 else '-'} {abs(bonus)} against {c['dc']}."
+        )
+    return " ".join(parts)
 
 
 class SessionOrchestrator:
@@ -212,6 +295,11 @@ class SessionOrchestrator:
         self.memory_processing = MemoryProcessingService(
             session, compiler=self.compiler, runner=self.runner, memory=self.memory
         )
+        from app.services.promotion import PromotionService
+
+        self.promotion = PromotionService(
+            session, compiler=self.compiler, runner=self.runner, memory=self.memory
+        )
 
     # -- entry -------------------------------------------------------------------------------------
 
@@ -219,11 +307,14 @@ class SessionOrchestrator:
         self, h: CampaignHandle, req: PlayRequest, emit=None
     ) -> PlayResult:
         emit = emit or (lambda name, payload: None)
+        self.runner.observer = emit  # model-call progress rides the turn stream
+        self._ruling_cache: dict[str, dict] = {}  # rulings made this turn, by the attempt text
         campaign = await self.session.get(Campaign, h.campaign_id)
         turn = Turn(
             h, budget=budget_from_settings(self.settings, campaign.settings if campaign else None)
         )
         emit("accepted", {"turn_id": str(turn.turn_id)})
+        self.current_turn_id = turn.turn_id
         result = PlayResult(turn.turn_id)
         first_scene = await self.perspective.repo.current_scene(req.actor_id)
         if first_scene is None or not self._in_combat(first_scene):
@@ -237,9 +328,17 @@ class SessionOrchestrator:
                 "error",
                 {
                     "code": "ACTION_NEEDS_CLARIFICATION",
+                    "message": exc.question,
                     "clarification_id": str(exc.clarification_id),
                     "question": exc.question,
                     "candidates": exc.candidates,
+                    "details": {
+                        "clarification_id": str(exc.clarification_id),
+                        "question": exc.question,
+                        "candidates": exc.candidates,
+                        "original_input": exc.original_input,
+                        "reason": exc.reason,
+                    },
                 },
             )
             await turn.finish(self.session)
@@ -249,6 +348,12 @@ class SessionOrchestrator:
             await turn.finish(self.session)
             await self.session.commit()
             raise
+        except Exception as exc:
+            # the turn's world changes roll back, but its audit stays: model runs, the contexts
+            # they were sent, decision traces and the turn's metrics (play session 2026-10-05:
+            # failed turns left no record of the call that failed)
+            await self._keep_audit_after_failure(turn, exc)
+            raise
         result.metrics = turn.summary()
         await turn.finish(self.session)
         await self.session.commit()
@@ -256,6 +361,152 @@ class SessionOrchestrator:
             "complete", {"metrics": result.metrics, "needs_player_input": result.needs_player_input}
         )
         return result
+
+    async def _ooc_answer(
+        self, h: CampaignHandle, req: PlayRequest, text: str, scene: Scene, turn: Turn
+    ) -> str:
+        """An out-of-character question answered from the focus character's perspective by
+        the table assistant (play session 2026-10-05: OOC was "noted" and never reached the
+        model). No events: nothing in the world happens."""
+        rs = self.engine.ruleset
+        rules = (
+            "Attributes: "
+            + ", ".join(d.name for d in rs.attributes.values())
+            + ". Skills: "
+            + ", ".join(d.name for d in rs.skills.values())
+            + ". Checks roll 1d20 + attribute + skill against a difficulty: "
+            + ", ".join(f"{k} {v}" for k, v in rs.manifest.difficulty_scale.items())
+            + "."
+        )
+        log = await self._scene_log(req.actor_id, scene, limit=6)
+        ctx = await self.compiler.compile(
+            h,
+            "table_assistant",
+            actor_id=req.actor_id,
+            purpose="answer an out-of-character question",
+            situation=f'The player asks (out of character): "{text}"',
+            extra_sections={
+                "rules_public": rules,
+                **({"recent_turns": "This scene so far:\n- " + "\n- ".join(log)} if log else {}),
+            },
+        )
+        res = await self.runner.run(h, ctx, turn_id=turn.turn_id)
+        turn.record_call(
+            "table_assistant",
+            calls=res.calls,
+            prompt_tokens=res.prompt_tokens,
+            completion_tokens=res.completion_tokens,
+            context_tokens=ctx.estimated_tokens,
+        )
+        answer = (res.text or "").strip() if res.status in ("ok", "repaired") else ""
+        return answer or "The table could not answer that just now; try asking again."
+
+    async def _scene_log(
+        self, actor_id: uuid.UUID, scene: Scene | None, *, limit: int = 6
+    ) -> list[str]:
+        """This scene so far, as this player saw it (app/services/scene_log.py)."""
+        from app.services.scene_log import render_turns, scene_turns
+
+        if scene is None:
+            scene = await self.perspective.repo.current_scene(actor_id)
+        view = await self.perspective.scene_view(actor_id)
+        names = {str(p.actor_id): p.known_as for p in (view.participants if view else [])}
+        me = await self.perspective.repo.self_name(actor_id) or "You"
+        turns = await scene_turns(self.session, actor_id, scene, limit=limit)
+        return render_turns(turns, player_name=me, names=names)
+
+    async def _keep_audit_after_failure(self, turn: Turn, exc: Exception) -> None:
+        """The turn's world changes roll back; its audit stays: model runs, the contexts they
+        were sent (snapshots and items) and decision traces (play session 2026-10-05: failed
+        turns left no record of the call that failed). The rows are read back inside the
+        still-open transaction, then written again after the rollback."""
+        import logging
+
+        from app.persistence.models import ContextItem, ContextSnapshot, DecisionTrace, ModelRun
+
+        def cols(obj, cls) -> dict:
+            return {c.key: getattr(obj, c.key) for c in cls.__table__.columns}
+
+        kept: list[tuple[type, dict]] = []
+        try:
+            await self.session.flush()
+            runs = (
+                (
+                    await self.session.execute(
+                        select(ModelRun).where(ModelRun.turn_id == turn.turn_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            snap_ids = {r.context_snapshot_id for r in runs if r.context_snapshot_id}
+            snaps = (
+                (
+                    await self.session.execute(
+                        select(ContextSnapshot).where(ContextSnapshot.id.in_(snap_ids))
+                    )
+                )
+                .scalars()
+                .all()
+                if snap_ids
+                else []
+            )
+            items = (
+                (
+                    await self.session.execute(
+                        select(ContextItem).where(ContextItem.snapshot_id.in_(snap_ids))
+                    )
+                )
+                .scalars()
+                .all()
+                if snap_ids
+                else []
+            )
+            traces = (
+                (
+                    await self.session.execute(
+                        select(DecisionTrace).where(
+                            DecisionTrace.model_run_id.in_([r.id for r in runs])
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+                if runs
+                else []
+            )
+            for cls, rows in (
+                (ContextSnapshot, snaps),
+                (ContextItem, items),
+                (ModelRun, runs),
+                (DecisionTrace, traces),
+            ):
+                kept += [(cls, cols(r, cls)) for r in rows]
+        except Exception:  # noqa: BLE001 - the session may be unusable after the failure
+            logging.getLogger(__name__).exception("could not read the failed turn's audit")
+        await self.session.rollback()
+        # parents before children: snapshots, their items, the runs, then decision traces
+        for cls in (ContextSnapshot, ContextItem, ModelRun, DecisionTrace):
+            for kcls, data in kept:
+                if kcls is not cls:
+                    continue
+                if cls is ModelRun and data.get("status") == "pending":
+                    data["status"] = "failed"
+                    data["error"] = data.get("error") or f"turn failed: {type(exc).__name__}"
+                self.session.add(cls(**data))
+            try:
+                await self.session.flush()
+            except Exception:  # noqa: BLE001 - a row tied to rolled-back state cannot return
+                logging.getLogger(__name__).exception("audit rows %s not kept", cls.__name__)
+                await self.session.rollback()
+                break
+        turn.notes.append(f"turn failed: {type(exc).__name__}: {str(exc)[:300]}")
+        await turn.finish(self.session)
+        try:
+            await self.session.commit()
+        except Exception:  # noqa: BLE001 - never mask the original failure
+            logging.getLogger(__name__).exception("could not keep the failed turn's audit")
+            await self.session.rollback()
 
     # -- the turn ------------------------------------------------------------------------------
 
@@ -297,11 +548,46 @@ class SessionOrchestrator:
             text, channel = self._parse_prefix(pending.original_input, "auto")
         elif pending is not None:
             pending.status = "cancelled"  # an unrelated input cancels it
+        resume = None
+        if req.roll_request_id is not None:
+            from app.persistence.models import PendingRoll
+
+            resume = await self.session.get(PendingRoll, req.roll_request_id)
+            if resume is None or resume.actor_id != req.actor_id or resume.status != "open":
+                raise WorldError("no such open roll request")
+            if req.roll_decision == "reconsider":
+                resume.status = "reconsidered"
+                result.channel = "ooc"
+                result.ooc = "You hold off. Nothing happens; try a different approach."
+                result.versions = await self._versions(h, scene)
+                return
+            resume.status = "rolled"
+            text, channel = resume.original_input, resume.channel
+            req.target_actor_ids = [uuid.UUID(x) for x in resume.target_actor_ids]
+            self._ruling_cache = dict(resume.rulings or {})
+            result.dev_notes.append(f"rolling for request {resume.id}: interpretation reused")
+        else:
+            # an unanswered roll request lapses when the player does something else
+            from app.persistence.models import PendingRoll
+
+            for stale in (
+                (
+                    await self.session.execute(
+                        select(PendingRoll).where(
+                            PendingRoll.actor_id == req.actor_id, PendingRoll.status == "open"
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            ):
+                stale.status = "lapsed"
         result.channel = channel
+        channel_in = channel
 
         if channel == "ooc":
-            result.ooc = "noted (out of character; no in-world effect)"
-            result.mechanical_notices.append("(OOC) noted")
+            emit("stage", {"stage": "ooc", "label": "Asking the table"})
+            result.ooc = await self._ooc_answer(h, req, text, scene, turn)
             result.versions = await self._versions(h, scene)
             return
         if channel == "private":
@@ -326,7 +612,14 @@ class SessionOrchestrator:
         hap = Happenings(req.actor_id, in_combat=self._in_combat(scene))
         candidates = await self._candidates(h, req.actor_id, scene)
         explicit_speech = channel in ("say", "whisper")  # /say, /whisper or request channel
-        intent = await self._interpret(h, req, text, channel, candidates, turn)
+        emit("stage", {"stage": "interpreting", "label": "Reading what you do"})
+        if resume is not None:
+            from app.ai.roles import IntentInterpreterOut
+
+            intent = IntentInterpreterOut.model_validate(resume.intent)
+        else:
+            intent = await self._interpret(h, req, text, channel, candidates, turn)
+        emit("stage", {"stage": "resolving", "label": "Resolving actions"})
         if channel == "auto":
             channel = intent.channel
             result.channel = channel
@@ -354,8 +647,8 @@ class SessionOrchestrator:
                 turn.notes.append("non-speech intents ignored in explicit speech")
             intent.intents = kept
         if channel == "ooc":
-            result.ooc = "noted"
-            result.mechanical_notices.append("(OOC) noted")
+            emit("stage", {"stage": "ooc", "label": "Asking the table"})
+            result.ooc = await self._ooc_answer(h, req, text, scene, turn)
             result.versions = await self._versions(h, scene)
             return
 
@@ -373,6 +666,38 @@ class SessionOrchestrator:
                 await self._raise_clarification(
                     h, req, scene, text, f"Which {item['kind']} do you mean?", item["options"], turn
                 )
+
+        # dice (manual): a check the game calls for pauses here, before anything happens
+        dice_mode = ((campaign.settings or {}).get("dice_mode") if campaign else None) or getattr(
+            self.settings, "dice_mode_default", "manual"
+        )
+        if resume is None and dice_mode == "manual":
+            checks = await self._preflight_checks(h, req, scene, resolved, channel, text, turn)
+            if checks:
+                from app.persistence.models import PendingRoll
+
+                pr = PendingRoll(
+                    campaign_id=h.campaign_id,
+                    actor_id=req.actor_id,
+                    turn_id=turn.turn_id,
+                    original_input=text,
+                    channel=channel_in,
+                    target_actor_ids=[str(x) for x in req.target_actor_ids],
+                    intent=intent.model_dump(),
+                    rulings=dict(self._ruling_cache),
+                    checks=checks,
+                )
+                self.session.add(pr)
+                await self.session.flush()
+                result.roll_request = {
+                    "id": str(pr.id),
+                    "checks": checks,
+                    "prompt": roll_prompt(checks),
+                }
+                result.needs_player_input = True
+                emit("roll_request", result.roll_request)
+                result.versions = await self._versions(h, scene)
+                return
 
         # 9 (part): player assertions, per policy
         policy = (
@@ -416,7 +741,7 @@ class SessionOrchestrator:
                     + 1,
                 }
             else:
-                result.mechanical_notices.append(f"(OOC) {outcome.note}")
+                result.dev_notes.append(f"assertion {outcome.result}: {outcome.note}")
 
         # a player action that names latent decoration establishes it (canon allowlist §2)
         if channel == "do":
@@ -427,11 +752,46 @@ class SessionOrchestrator:
         # 6–8: actions in order; a failed/interrupted step stops the chain
         spoke = False
         last_action: str | None = None
+        social_done: set[str] = set()
         for step in resolved:
-            kind = step["intent"].action_type.lower().replace(" ", "_")
+            # an earlier step may have moved the actor (travel): act where they are now
+            # (A9 replay: a later improvised step ran in the old scene and crashed the turn)
+            scene = await self.perspective.repo.current_scene(req.actor_id) or scene
+            kind = canonical_kind(step["intent"].action_type, channel)
+            if kind != step["intent"].action_type.lower().replace(" ", "_"):
+                turn.notes.append(f"action type {step['intent'].action_type!r} read as {kind!r}")
+            if kind in SOCIAL_SKILLS:
+                # spoken to the target, and how well it lands is the engine's roll
+                if not spoke:
+                    spoke = await self._speak(
+                        h,
+                        req,
+                        scene,
+                        text,
+                        channel if channel in ("say", "whisper") else "say",
+                        intent,
+                        step,
+                        candidates,
+                        turn,
+                        result,
+                        emit,
+                        hap,
+                    )
+                target = step["candidate"].id if step["candidate"] is not None else ""
+                if f"{kind}:{target}" not in social_done:
+                    social_done.add(f"{kind}:{target}")
+                    await self._social(h, req, scene, kind, step, turn, result, emit, hap, text)
+                continue
             if kind in SPEECH_TYPES or (
                 channel in ("say", "whisper") and kind in ("say", "whisper", "talk")
             ):
+                if spoke:
+                    # one utterance per turn, however many speech intents describe it (A9
+                    # replay: "Excuse me, merchant!" was spoken three times); later listeners
+                    # are addressed by it already when the speech named them
+                    if step["candidate"] is not None and step["candidate"].kind == "actor":
+                        hap.addressed.add(uuid.UUID(step["candidate"].id))
+                    continue
                 spoke = (
                     await self._speak(
                         h,
@@ -481,7 +841,20 @@ class SessionOrchestrator:
 
         # 11–13: AI actors — reactions in social scenes, initiative turns in combat
         await self.session.flush()
+        # background extras the player keeps engaging become living characters (and answer
+        # this very turn); play session 2026-10-05
+        engaged = set(hap.addressed) | set(hap.social) | set(hap.attacked)
+        if engaged and not hap.in_combat:
+            fresh_scene = await self.session.get(Scene, scene.id)
+            for aid in await self.promotion.note_engagement(fresh_scene, engaged):
+                emit("stage", {"stage": "promoting", "label": "Someone comes to life"})
+                result.dev_notes.append(
+                    await self.promotion.promote(
+                        h, aid, focus_actor_id=req.actor_id, scene=fresh_scene, turn=turn
+                    )
+                )
         await self._reset_spotlight(scene)
+        emit("stage", {"stage": "reactions", "label": "Others respond"})
         if hap.in_combat:
             await self._ai_combat(h, req, scene, turn, result, emit, last_action)
         else:
@@ -504,7 +877,9 @@ class SessionOrchestrator:
         await self.session.flush()
         events = await self._events_since(h, seq_start)
         result.visible_rolls = await self._visible_rolls(events)
-        result.mechanical_notices += await self._notices(req.actor_id, events)
+        for n in await self._notices(req.actor_id, events):
+            # bare renderings of the player's own act carry nothing the player didn't do
+            (result.dev_notes if n in GENERIC_NOTICES else result.mechanical_notices).append(n)
         result.state_changes = await self._state_changes(req.actor_id, hp_before)
         result.versions = await self._versions(h, scene)
         turn.mark_first_output()
@@ -518,7 +893,9 @@ class SessionOrchestrator:
         )
 
         # 15–17: narrator (streamed), canon pass, checkpoints
+        emit("stage", {"stage": "narrating", "label": "Narrating"})
         await self._narrate(h, req, scene, events, text, turn, result, emit, campaign)
+        emit("stage", {"stage": "wrapping_up", "label": "Updating memories and canon"})
         await self._checkpoints(h, req, scene, events, turn)
 
     # -- channel / clarification ----------------------------------------------------------------
@@ -671,6 +1048,7 @@ class SessionOrchestrator:
             short=turn.degraded("short_narrator_prompt"),
             compressed=compressed,
             outcomes=narration_outcomes(result),
+            recent=await self._scene_log(req.actor_id, scene),
         )
         try:
             narration, _run = await self.narration.narrate(h, bundle, turn, emit)
@@ -678,6 +1056,13 @@ class SessionOrchestrator:
             turn.notes.append(f"narrator error: {type(exc).__name__}: {exc}")
             narration = None
         result.narration = narration
+        if narration:
+            # narration may only quote what was actually said this turn (dev check; the
+            # prompt forbids it; play session 2026-10-05 had Tomas "agree" to a deal)
+            spoken = " ".join(bundle.dialogue).lower()
+            for q in re.findall(r'["“]([^"”]{12,})["”]', narration):
+                if q.strip().lower()[:40] not in spoken:
+                    result.dev_notes.append(f"narration quoted words nobody said: {q[:120]!r}")
         if narration and not turn.degraded("drop_canon_extractor") and fresh is not None:
             if turn.at_risk(complex_turn=True):
                 turn.degrade()
@@ -818,6 +1203,18 @@ class SessionOrchestrator:
                     line += f" Everyone present heard it, including {', '.join(others)}."
                 line += " Anything you say aloud, they will hear too."
             lines.append(line)
+        if actor_id in hap.social:
+            label, convincing, margin = hap.social[actor_id]
+            lines.append(
+                f"They are making a {label} attempt on you. The engine's roll says it was "
+                + (
+                    "convincing" + (" — very" if margin >= 5 else "")
+                    if convincing
+                    else "unconvincing" + (" — badly" if margin <= -5 else "")
+                )
+                + ". Let that shape your answer: a convincing appeal should move you, an "
+                "unconvincing one should not, within what your character would ever do."
+            )
         if not lines:
             return generic
         return (
@@ -1003,6 +1400,12 @@ class SessionOrchestrator:
                 cand = by_id.get(forced)  # the answered clarification names a candidate id
             else:
                 cand = match_ref(cands, it.target_ref)
+                if cand is None and it.target_ref:
+                    # the model's own ref words ("irritated_merchant") name the candidate it
+                    # meant (A9 replay: unmatched, the player's sentence then matched a place)
+                    cand = by_ref_words(cands, it.target_ref)
+                    if cand is not None:
+                        note = f"target {it.target_ref!r} -> {cand.ref}: by the ref's own words"
                 # only a targeted intent is re-checked ("rest by the gate" has no target),
                 # and only against the kinds of thing that action can take (A9 slice: "attack
                 # the closest thief" matched a place by one word and Alex walked out of a fight)
@@ -1027,6 +1430,12 @@ class SessionOrchestrator:
             )
             amb = False
             options: list[Candidate] = []
+            if needs_actor and forced is None and cand is None:
+                # the player's words name the person ("attack the merchant"; play session
+                # 2026-10-05 offered only the guards)
+                cand = actor_by_words(cands, text)
+                if cand is not None:
+                    note = f"target {it.target_ref!r} -> {cand.ref}: the player's words name them"
             if needs_actor and forced is None:
                 actors = [c for c in cands if c.kind == "actor"]
                 pool = (
@@ -1080,7 +1489,14 @@ class SessionOrchestrator:
             actor_id=req.actor_id,
             purpose="interpret player input",
             situation=situation,
-            extra_sections={"candidates": self._candidates_text(cands)},
+            extra_sections={
+                "candidates": self._candidates_text(cands),
+                **(
+                    {"recent_turns": "Earlier in this scene (oldest first):\n- " + "\n- ".join(log)}
+                    if (log := await self._scene_log(req.actor_id, None, limit=4))
+                    else {}
+                ),
+            },
         )
         self._last_ref_map = dict(ctx.ref_map)
         res = await self.runner.run(h, ctx, turn_id=turn.turn_id)
@@ -1092,7 +1508,25 @@ class SessionOrchestrator:
             context_tokens=ctx.estimated_tokens,
         )
         if not res.ok or res.output is None:
-            raise WorldError(f"could not interpret input: {'; '.join(res.errors) or res.status}")
+            # never lose the player's turn to a parse failure (play session 2026-10-05): what
+            # they wrote is spoken if it reads as speech, otherwise ruled on as one attempt
+            from app.ai.roles import IntentInterpreterOut
+
+            spoken = channel in ("say", "whisper") or '"' in text or "“" in text
+            fallback = channel if channel in ("say", "whisper") else ("say" if spoken else "do")
+            turn.notes.append(
+                f"interpreter output unusable ({res.status}: {'; '.join(res.errors)[:200]}); "
+                f"fallback: {fallback}"
+            )
+            return IntentInterpreterOut.model_validate(
+                {
+                    "channel": fallback,
+                    "confidence": 0.3,
+                    "intents": []
+                    if fallback in ("say", "whisper")
+                    else [{"order": 1, "action_type": "other", "target_ref": None}],
+                }
+            )
         return res.output  # type: ignore[return-value]
 
     async def _adjudicate(
@@ -1241,16 +1675,14 @@ class SessionOrchestrator:
             except StaleStateError as exc:
                 raise StaleState(0, exc.actual) from exc
         else:
-            ruling = await self._adjudicate(h, req.actor_id, text, turn)
+            ruling = await self._cached_ruling(h, req.actor_id, text, turn)
             if ruling is None:
-                result.mechanical_notices.append(
-                    f"(OOC) could not adjudicate '{kind}'; nothing happened"
-                )
+                result.dev_notes.append(f"could not adjudicate '{kind}'; nothing happened")
                 return None
             try:
                 validated = self.validate_ruling(ruling)
             except (EffectError, Exception) as exc:  # noqa: BLE001
-                result.mechanical_notices.append(f"(OOC) ruling rejected: {exc}")
+                result.dev_notes.append(f"(OOC) ruling rejected: {exc}")
                 return None
             outcome = await self.actions.perform_improvised(
                 h, scene.id, actor_key, validated, description=text, turn_id=turn.turn_id
@@ -1269,6 +1701,151 @@ class SessionOrchestrator:
             turn.mark_first_output()
             emit("mechanics", {"action": entry, "events": [e.get("type") for e in outcome.events]})
         return outcome
+
+    async def _cached_ruling(
+        self, h: CampaignHandle, actor_id: uuid.UUID, text: str, turn: Turn
+    ) -> RulesAdjudicatorOut | None:
+        """One ruling per attempt per turn; a resumed roll reuses the ruling it was shown."""
+        from app.ai.roles import RulesAdjudicatorOut
+
+        if text in self._ruling_cache:
+            return RulesAdjudicatorOut.model_validate(self._ruling_cache[text])
+        ruling = await self._adjudicate(h, actor_id, text, turn)
+        if ruling is not None:
+            self._ruling_cache[text] = ruling.model_dump()
+        return ruling
+
+    async def _preflight_checks(
+        self,
+        h: CampaignHandle,
+        req: PlayRequest,
+        scene: Scene,
+        resolved: list[dict[str, Any]],
+        channel: str,
+        text: str,
+        turn: Turn,
+    ) -> list[dict[str, Any]]:
+        """The checks this turn will call for, previewed without rolling: the player sees the
+        skill, the number to reach, their bonus and what is at stake before deciding to roll."""
+        checks: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        state = None
+        for step in resolved:
+            kind = canonical_kind(step["intent"].action_type, channel)
+            cand = step["candidate"]
+            if kind in SOCIAL_SKILLS:
+                key = f"{kind}:{cand.id if cand else ''}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                skill, attribute, label = SOCIAL_SKILLS[kind]
+                difficulty: Any = "moderate"
+                stakes = SOCIAL_STAKES[kind]
+            elif (
+                kind not in SPEECH_TYPES
+                and kind not in FREE_TYPES
+                and kind not in READ_TYPES
+                and ACTION_MAP.get(kind) is None
+                and not (cand is not None and cand.kind == "location")
+            ):
+                ruling = await self._cached_ruling(h, req.actor_id, text, turn)
+                if ruling is None or not ruling.requires_check or not ruling.check:
+                    continue
+                c = ruling.check
+                skill = c.get("skill")
+                attribute = c.get("attribute")
+                difficulty = c.get("difficulty", "moderate")
+                label = (
+                    str(skill or attribute).split(".")[-1].replace("_", " ").title()
+                    if (skill or attribute)
+                    else "Ability"
+                )
+                stakes = {
+                    "success": ruling.stakes.get("success") or "You get what you were trying for.",
+                    "failure": ruling.stakes.get("failure") or "It doesn't work, and it costs you.",
+                    "retry": ruling.stakes.get("retry") or "You may be able to try another way.",
+                }
+            else:
+                continue
+            if state is None:
+                loaded = await self.actions.load_scene(h, scene.id)
+                state = loaded.ctx.states[str(req.actor_id)]
+            try:
+                p = self.engine.preview(
+                    state, "check.core", attribute=attribute, skill=skill, difficulty=difficulty
+                )
+            except Exception as exc:  # noqa: BLE001 - an unpreviewable check just rolls
+                turn.notes.append(f"check preview failed: {exc}")
+                continue
+            checks.append(
+                {
+                    **p,
+                    "label": label,
+                    "kind": kind,
+                    "target_known_as": cand.known_as if cand is not None else None,
+                    "dc": p["target"],
+                    "stakes": stakes,
+                }
+            )
+        return checks
+
+    async def _social(
+        self,
+        h: CampaignHandle,
+        req: PlayRequest,
+        scene: Scene,
+        kind: str,
+        step: dict[str, Any],
+        turn: Turn,
+        result: PlayResult,
+        emit,
+        hap: Happenings,
+        text: str,
+    ) -> None:
+        """A social action resolved by the engine, without a ruling call: the matching skill
+        against a moderate difficulty. The listener learns how convincing it was and decides
+        what to do about it in character."""
+        skill, attribute, label = SOCIAL_SKILLS[kind]
+        ruling = {
+            "requires_check": True,
+            "check": {
+                "check": "check.core",
+                "skill": skill,
+                "attribute": attribute,
+                "difficulty": "moderate",
+                "purpose": label,
+            },
+            "on_success": [],
+            "on_failure": [],
+            "time_cost_seconds": 6,
+            "summary": f"{label}: {text[:120]}",
+        }
+        try:
+            from app.ai.roles import RulesAdjudicatorOut
+
+            validated = self.validate_ruling(RulesAdjudicatorOut.model_validate(ruling))
+            outcome = await self.actions.perform_improvised(
+                h, scene.id, str(req.actor_id), validated, description=text, turn_id=turn.turn_id
+            )
+        except Exception as exc:  # noqa: BLE001 - the words were still spoken
+            result.dev_notes.append(f"social check not resolved: {type(exc).__name__}: {exc}")
+            return
+        target = step["candidate"]
+        entry = {
+            "action": f"social.{kind}",
+            "target": target.known_as if target is not None else None,
+            "status": outcome.status,
+            "reason": outcome.reason,
+            "summary": outcome.trace.summary if outcome.trace else "",
+        }
+        result.actions.append(entry)
+        emit("mechanics", {"action": entry, "events": [e.get("type") for e in outcome.events]})
+        if target is not None and target.kind == "actor":
+            check = next((s for s in outcome.steps if s.kind == "check"), None)
+            margin = 0
+            if check is not None:
+                margin = int(check.detail.get("total", 0)) - int(check.detail.get("target", 0))
+            hap.social[uuid.UUID(target.id)] = (label, outcome.status == "succeeded", margin)
 
     async def _read(
         self,
@@ -1501,12 +2078,21 @@ class SessionOrchestrator:
             slug(name): eid
             for eid, name in (await self.perspective.known_entities(req.actor_id)).items()
         }
-        spoken = (QUOTE_RE.search(text) or [None, text])[1]
+        quoted = QUOTE_RE.search(text)
+        # quoted words first; then the interpreter's line for described speech; the whole text
+        # only on an explicit say/whisper (A9 replay: "I'd like to subtly motion for Elara…"
+        # was spoken aloud)
+        spoken = (
+            quoted[1]
+            if quoted
+            else (intent.utterance or "").strip()
+            or (text if channel in ("say", "whisper") else text)
+        )
         targets = list(req.target_actor_ids)
         if step is not None and step["candidate"] is not None and step["candidate"].kind == "actor":
             targets = targets or [uuid.UUID(step["candidate"].id)]
         elif not targets and intent.targets:
-            named = [match_ref(cands, t) for t in intent.targets]
+            named = [match_ref(cands, t) or actor_by_words(cands, t) for t in intent.targets]
             targets = [uuid.UUID(c.id) for c in named if c is not None and c.kind == "actor"]
         ch = (
             "whisper"
@@ -1650,16 +2236,47 @@ class SessionOrchestrator:
             .scalars()
             .all()
         )
-        return [
-            {
-                "expression": r.expression,
-                "raw": r.raw,
-                "modifier": r.modifier,
-                "total": r.final_result,
-                "purpose": r.purpose,
-            }
-            for r in rows
-        ]
+        by_event = {e.id: e for e in events}
+        # a check's numbers live on its check.rolled event; a roll row may be attached to the
+        # action's final event instead (improvised and social checks), so pair it with its
+        # actor's next check event in sequence
+        checks_by_actor: dict[str, list[Event]] = {}
+        for e in sorted(events, key=lambda x: x.sequence_number):
+            if e.event_type == "check.rolled":
+                checks_by_actor.setdefault(str((e.payload or {}).get("actor")), []).append(e)
+        rows = sorted(
+            rows,
+            key=lambda r: by_event[r.event_id].sequence_number if r.event_id in by_event else 0,
+        )
+        out = []
+        for r in rows:
+            ev_ = by_event.get(r.event_id)
+            if ev_ is None or ev_.event_type != "check.rolled":
+                queue = checks_by_actor.get(str(r.actor_id), [])
+                ev_ = queue.pop(0) if queue else ev_
+            elif ev_ in checks_by_actor.get(str(r.actor_id), []):
+                checks_by_actor[str(r.actor_id)].remove(ev_)
+            p = (ev_.payload if ev_ is not None else {}) or {}
+            natural = _natural(r.kept) if r.kept else _natural(r.raw)
+            check_total = (
+                p.get("total") if ev_ is not None and ev_.event_type == "check.rolled" else None
+            )
+            out.append(
+                {
+                    "id": str(r.id),
+                    "expression": r.expression,
+                    "raw": r.raw,
+                    "natural": natural,
+                    "modifier": r.modifier,
+                    "total": check_total if check_total is not None else r.final_result,
+                    "purpose": r.purpose,
+                    "dc": p.get("versus"),
+                    "success": p.get("success"),
+                    "degree": p.get("degree"),
+                    "source": "engine",
+                }
+            )
+        return out
 
     async def _notices(self, actor_id: uuid.UUID, events: list[Event]) -> list[str]:
         if not events:
@@ -1766,8 +2383,48 @@ def closer_to_words(
     base = score(picked) if picked is not None else 0
     pool = [c for c in cands if c.kind in ((picked.kind,) if picked else kinds) and c is not picked]
     scored = sorted(((score(c), c) for c in pool), key=lambda x: -x[0])
+    # with no pick, one shared word is enough for an item ("the ledger"); a place needs
+    # two (A9 replay: "tail this merchant" matched "…faded merchant sign" and the party left)
     need = base + 2 if picked is not None else 1
     if not scored or scored[0][0] < need:
+        return None
+    if picked is None and scored[0][1].kind == "location" and scored[0][0] < 2:
+        return None
+    if len(scored) > 1 and scored[1][0] == scored[0][0]:
+        return None
+    return scored[0][1]
+
+
+def by_ref_words(cands: list[Candidate], ref: str) -> Candidate | None:
+    """The one candidate of any kind whose known name shares the most words with the model's
+    ref, if no other ties it."""
+    words = _tokens(ref.replace("_", " "))
+    if not words:
+        return None
+    scored = sorted(
+        ((len(_tokens(c.known_as) & words), c) for c in cands if c.known_as != "you"),
+        key=lambda x: -x[0],
+    )
+    if not scored or scored[0][0] < 1:
+        return None
+    if len(scored) > 1 and scored[1][0] == scored[0][0]:
+        return None
+    return scored[0][1]
+
+
+def actor_by_words(cands: list[Candidate], text: str) -> Candidate | None:
+    """The one actor (not the player) whose known name shares the most words with the input,
+    when no other actor ties it."""
+    words = _tokens(text)
+    scored = sorted(
+        (
+            (len(_tokens(c.known_as) & words), c)
+            for c in cands
+            if c.kind == "actor" and c.known_as not in ("you",)
+        ),
+        key=lambda x: -x[0],
+    )
+    if not scored or scored[0][0] < 1:
         return None
     if len(scored) > 1 and scored[1][0] == scored[0][0]:
         return None

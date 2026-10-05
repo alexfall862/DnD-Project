@@ -43,6 +43,8 @@ class PlayBody(BaseModel):
     target_actor_ids: list[uuid.UUID] = Field(default_factory=list)
     client_state: ClientState = Field(default_factory=ClientState)
     clarification_id: uuid.UUID | None = None
+    roll_request_id: uuid.UUID | None = None
+    roll_decision: str | None = None  # "roll" | "reconsider"
 
 
 class PlayOut(BaseModel):
@@ -60,6 +62,8 @@ class PlayOut(BaseModel):
     needs_player_input: bool
     metrics: dict[str, Any]
     ooc: str | None = None
+    dev_notes: list[str] = Field(default_factory=list)
+    roll_request: dict[str, Any] | None = None
 
 
 async def _handle(
@@ -86,10 +90,27 @@ async def _handle(
         body.client_state.known_world_version,
         body.client_state.known_scene_version,
         body.clarification_id,
+        body.roll_request_id,
+        body.roll_decision,
     )  # type: ignore[arg-type]
     try:
         res = await orch.process_player_input(h, req, emit=emit)
     except NeedsClarification as exc:
+        await _record_failure(
+            session,
+            h,
+            body,
+            getattr(orch, "current_turn_id", None),
+            {
+                "clarification": {
+                    "clarification_id": str(exc.clarification_id),
+                    "question": exc.question,
+                    "candidates": exc.candidates,
+                    "original_input": exc.original_input,
+                    "reason": exc.reason,
+                }
+            },
+        )
         raise ApiError(
             exc.question,
             code="ACTION_NEEDS_CLARIFICATION",
@@ -112,7 +133,23 @@ async def _handle(
     except UnauthorizedPerspective as exc:
         raise UnauthorizedPerspectiveError(str(exc)) from exc
     except WorldError as exc:
+        await _record_failure(
+            session,
+            h,
+            body,
+            getattr(orch, "current_turn_id", None),
+            {"error": {"code": "ACTION_INVALID", "message": str(exc)}},
+        )
         raise ApiError(str(exc), code="ACTION_INVALID", status_code=400) from exc
+    except Exception as exc:
+        await _record_failure(
+            session,
+            h,
+            body,
+            getattr(orch, "current_turn_id", None),
+            {"error": {"code": "INTERNAL_ERROR", "message": f"{type(exc).__name__}: {exc}"}},
+        )
+        raise
     out = PlayOut(
         turn_id=res.turn_id,
         channel=res.channel,
@@ -128,9 +165,42 @@ async def _handle(
         needs_player_input=res.needs_player_input,
         metrics=res.metrics,
         ooc=res.ooc,
+        dev_notes=res.dev_notes,
+        roll_request=res.roll_request,
     )
     await _record_feed(session, h, body, out)
     return out
+
+
+async def _record_failure(
+    session: AsyncSession,
+    h: CampaignHandle,
+    body: PlayBody,
+    turn_id: uuid.UUID | None,
+    result: dict[str, Any],
+) -> None:
+    """A turn that asked for clarification or failed still belongs in the player's history,
+    with its turn id so dev view can open the trace (play session 2026-10-05)."""
+    from app.persistence.models import PlayerTurn
+
+    if turn_id is None:
+        return
+    try:
+        session.add(
+            PlayerTurn(
+                campaign_id=h.campaign_id,
+                timeline_id=h.timeline_id,
+                actor_id=body.actor_id,
+                turn_id=turn_id,
+                input_text=body.text,
+                channel=body.channel,
+                to_names=[],
+                result={"turn_id": str(turn_id), **result},
+            )
+        )
+        await session.commit()
+    except Exception:  # noqa: BLE001 - history is best-effort; never mask the turn's error
+        await session.rollback()
 
 
 async def _record_feed(

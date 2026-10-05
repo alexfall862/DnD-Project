@@ -69,6 +69,8 @@ class NarrativeBundle:
     # what became of the focus actor's own attempts this turn, authoritative (A9 slice:
     # an invalid pick-up was narrated as success because only the intent was given)
     outcomes: list[str] = field(default_factory=list)
+    # this scene so far, as the focus player saw it (continuity; play session 2026-10-05)
+    recent: list[str] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
@@ -119,6 +121,7 @@ class NarrationService:
         short: bool = False,
         compressed: list[str] | None = None,
         outcomes: list[str] | None = None,
+        recent: list[str] | None = None,
     ) -> NarrativeBundle:
         """Only the focus actor's own Observations for this turn's events, the transcript lines
         of speech events whose recipients include them, and mechanics they can see."""
@@ -203,6 +206,7 @@ class NarrationService:
             own_input,
             list(compressed or []),
             list(outcomes or []),
+            list(recent or []),
         )
 
     async def _speaker_name(
@@ -239,6 +243,14 @@ class NarrationService:
                 "style": bundle.style_text(),
                 "resolved_mechanics": bundle.mechanics_text(),
                 "scene": "Scene: " + bundle.scene_line,
+                **(
+                    {
+                        "recent_turns": "This scene so far (oldest first; for continuity only, do "
+                        "not retell it):\n- " + "\n- ".join(bundle.recent)
+                    }
+                    if bundle.recent
+                    else {}
+                ),
             },
         )
         chunks: list[str] = []

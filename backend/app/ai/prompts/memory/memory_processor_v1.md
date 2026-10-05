@@ -4,7 +4,7 @@ version: 1
 role: memory_processor
 authority: [memory, belief, emotion]
 schema: MemoryProcessorOut
-max_tokens: 200
+max_tokens: 700
 restrictions: [this actor's observations only, no narration, no trivia]
 ---
 Role: Memory Processor. Decide what THIS character retains from the recent experience listed

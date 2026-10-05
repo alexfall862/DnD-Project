@@ -29,7 +29,7 @@ from app.persistence.models.event import (
     TranscriptMessage,
     TranscriptRecipient,
 )
-from app.persistence.models.feed import PlayerTurn
+from app.persistence.models.feed import PendingRoll, PlayerTurn
 from app.persistence.models.generation import GenerationRun, GenerationStage
 from app.persistence.models.jobs import BackgroundJob
 from app.persistence.models.knowledge import (
@@ -88,6 +88,7 @@ __all__ = [
     "ModelRun",
     "TurnMetrics",
     "PlayerTurn",
+    "PendingRoll",
     "BackgroundJob",
     "GenerationRun",
     "GenerationStage",

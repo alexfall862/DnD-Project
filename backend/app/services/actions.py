@@ -341,8 +341,12 @@ class ActionService:
         ruling must already be validated (`validate_ruling`). Committed like any action."""
         loaded = await self.load_scene(h, scene_id, chooser=chooser)
         ctx = loaded.ctx
-        state = ctx.states[actor_key]
         from app.engine.actions import ActionRequest as _AR
+
+        if actor_key not in ctx.states:
+            req0 = _AR(actor_key, "action.improvised", None, params={}, source="human")
+            return ActionOutcome(req0, "invalid", reason="you are not there any more")
+        state = ctx.states[actor_key]
         from app.engine.actions import ResolutionTrace, StepRecord
 
         req = _AR(
@@ -379,7 +383,11 @@ class ActionService:
                 attribute=check.get("attribute"),
                 skill=check.get("skill"),
                 difficulty=check.get("difficulty", "moderate"),
-                purpose="improvised",
+                # named after what is tested, so the player sees "persuasion", not "improvised"
+                purpose=str(
+                    check.get("purpose")
+                    or (check.get("skill") or check.get("attribute") or "improvised").split(".")[-1]
+                ),
             )
             step = StepRecord(
                 "check",

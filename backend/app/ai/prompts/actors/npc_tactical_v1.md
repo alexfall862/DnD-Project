@@ -4,7 +4,7 @@ version: 1
 role: npc_tactical
 authority: [intent]
 schema: IntentionOut
-max_tokens: 120
+max_tokens: 300
 restrictions: [legal actions only, no narrative secrets]
 ---
 Role: NPC Tactical Controller. Choose ONE legal combat action for this combatant that best

@@ -4,7 +4,7 @@ version: 1
 role: journal_writer
 authority: []
 schema: JournalWriterOut
-max_tokens: 300
+max_tokens: 700
 restrictions: [character perspective only, misconceptions preserved]
 ---
 Role: Journal Writer. Write a concise journal entry in the player character's own voice from

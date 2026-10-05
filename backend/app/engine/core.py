@@ -72,6 +72,10 @@ class RulesEngine:
 
     # -- mechanics -----------------------------------------------------------------------------
 
+    def preview(self, state: ActorState, check_key: str, **kw: Any) -> dict[str, Any]:
+        """A check's die, bonus and target without rolling (for the player's roll card)."""
+        return _checks.preview_check(self.ruleset, self.calc, state, check_key, **kw)
+
     def check(self, state: ActorState, check_key: str, **kw: Any) -> _checks.CheckResult:
         return _checks.resolve_check(self.ruleset, self.dice, self.calc, state, check_key, **kw)
 

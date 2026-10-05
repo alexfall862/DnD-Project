@@ -4,7 +4,7 @@ version: 1
 role: claim_extractor
 authority: [claim]
 schema: ClaimExtractorOut
-max_tokens: 200
+max_tokens: 700
 restrictions: [propositions only, candidates only, no inference]
 ---
 Role: Claim Extractor. From the utterance text, list the assertions it actually makes as

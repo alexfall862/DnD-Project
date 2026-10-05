@@ -41,6 +41,8 @@ class ModelRequest:
     history: list[dict[str, str]] = field(
         default_factory=list
     )  # repair turns only; never campaign memory
+    # told about provider-side waits (A9 503 busy / 409 not loaded); never sent to the model
+    on_wait: Any = field(default=None, repr=False, compare=False)
 
     def messages(self) -> list[dict[str, str]]:
         # The run_id line is the first thing in the first user message: A9 keys sessions on it.
@@ -127,7 +129,7 @@ class A9Provider:
         (A9 generation run: a 4096-token World Author stage outlived a fixed 240 s timeout)."""
         return max(floor_s, max_tokens / 15 + 60)
 
-    async def _post_with_retries(self, body: dict[str, Any]) -> httpx.Response:
+    async def _post_with_retries(self, body: dict[str, Any], on_wait: Any = None) -> httpx.Response:
         not_loaded = 0
         floor = self._client.timeout.read or 240.0
         timeout = httpx.Timeout(
@@ -143,18 +145,22 @@ class A9Provider:
             if r.status_code == 503:
                 if attempt >= self.busy_retries:
                     raise ModelUnavailable("A9 busy")
-                await asyncio.sleep(float(r.headers.get("Retry-After", "5")))
+                wait = float(r.headers.get("Retry-After", "5"))
+                if on_wait:
+                    on_wait({"reason": "busy", "status": 503, "wait_s": wait})
+                await asyncio.sleep(wait)
                 continue
             if r.status_code == 409:
                 not_loaded += 1
                 if not_loaded > self.not_loaded_retries:
                     raise ModelUnavailable(f"model {body['model']} not loaded")
-                await asyncio.sleep(
-                    min(
-                        float(r.headers.get("Retry-After", self.not_loaded_wait_s)),
-                        self.not_loaded_wait_s,
-                    )
+                wait = min(
+                    float(r.headers.get("Retry-After", self.not_loaded_wait_s)),
+                    self.not_loaded_wait_s,
                 )
+                if on_wait:
+                    on_wait({"reason": "model not loaded", "status": 409, "wait_s": wait})
+                await asyncio.sleep(wait)
                 continue
             if r.status_code >= 400:
                 raise ProviderError(f"A9 {r.status_code}: {r.text[:300]}")
@@ -162,9 +168,11 @@ class A9Provider:
         raise ModelUnavailable("A9 unavailable")
 
     async def generate(self, req: ModelRequest) -> ModelResponse:
+        if self._sem.locked() and req.on_wait:
+            req.on_wait({"reason": "queued behind other calls (A9 concurrency limit)"})
         async with self._sem:
             t0 = time.perf_counter()
-            r = await self._post_with_retries(self._body(req))
+            r = await self._post_with_retries(self._body(req), req.on_wait)
             latency = int((time.perf_counter() - t0) * 1000)
         data = r.json()
         usage = data.get("usage") or {}
@@ -186,6 +194,8 @@ class A9Provider:
         )
 
     async def stream(self, req: ModelRequest) -> AsyncIterator[str]:
+        if self._sem.locked() and req.on_wait:
+            req.on_wait({"reason": "queued behind other calls (A9 concurrency limit)"})
         async with self._sem:
             async with self._client.stream(
                 "POST", "/chat/completions", json=self._body(req, stream=True)

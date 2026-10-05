@@ -656,3 +656,87 @@ async def turn_trace(
             for r in runs
         ],
     }
+
+
+@router.get("/rolls/{roll_id}", dependencies=[Depends(require_debug)])
+async def roll_certificate(
+    roll_id: uuid.UUID, session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """Proof that a roll came from the engine's dice service (dice step, play session
+    2026-10-05): the stored roll (expression, seed, raw dice), the event it resolved, and
+    and a replay: the same seed through the engine's dice function gives the same dice, which
+    no model output could have chosen. The model calls of the turn are listed for context."""
+    from app.persistence.models.rules import Roll
+
+    roll = await session.get(Roll, roll_id)
+    if roll is None:
+        raise NotFound("no such roll")
+    event = await session.get(Event, roll.event_id) if roll.event_id else None
+    turn_id = None
+    if event is not None:
+        from app.persistence.models.rules import Action
+
+        act = (
+            await session.execute(
+                select(Action).where(
+                    (Action.resolution_event_id == event.id) | (Action.start_event_id == event.id)
+                )
+            )
+        ).scalar_one_or_none()
+        turn_id = act.turn_id if act is not None else None
+    runs = []
+    if turn_id is not None:
+        runs = (
+            (
+                await session.execute(
+                    select(ModelRun)
+                    .where(ModelRun.turn_id == turn_id)
+                    .order_by(ModelRun.started_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    rolled_at = roll.created_at
+    return {
+        "source": "engine dice service (app/engine/dice.py); seeded, replayable",
+        "roll": {
+            "id": str(roll.id),
+            "expression": roll.expression,
+            "seed": roll.seed,
+            "raw": roll.raw,
+            "kept": roll.kept,
+            "modifier": roll.modifier,
+            "total": roll.final_result,
+            "purpose": roll.purpose,
+            "visibility": roll.visibility,
+            "rolled_at": rolled_at.isoformat() if rolled_at else None,
+        },
+        "event": None
+        if event is None
+        else {
+            "id": str(event.id),
+            "seq": event.sequence_number,
+            "type": event.event_type,
+            "payload": event.payload,
+        },
+        "turn_id": str(turn_id) if turn_id else None,
+        "replay": _replay(roll),
+        "model_calls_this_turn": [r.role for r in runs],
+    }
+
+
+def _replay(roll) -> dict[str, Any]:
+    from app.engine.dice import parse_dice, roll_with_seed
+
+    try:
+        raw, kept, total = roll_with_seed(parse_dice(roll.expression), int(roll.seed))
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc)}
+    stored = roll.raw if isinstance(roll.raw, list) else (roll.raw or {}).get("dice", roll.raw)
+    return {
+        "ok": list(raw) == list(stored if isinstance(stored, list) else []),
+        "raw": list(raw),
+        "kept": list(kept),
+        "dice_total": total,
+    }

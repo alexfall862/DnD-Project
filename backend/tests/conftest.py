@@ -8,6 +8,11 @@
 
 from __future__ import annotations
 
+import os
+
+# tests roll at once; the dice tests opt in to the manual pause (dice_mode on the campaign)
+os.environ.setdefault("DICE_MODE_DEFAULT", "auto")
+
 from collections.abc import AsyncIterator
 from pathlib import Path
 

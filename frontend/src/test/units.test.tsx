@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { parseSse } from "../api/client";
 import type { PlayResult } from "../api/types";
 import { parseHash, toHash } from "../state";
+import { applyEvent, fromServer } from "../turns";
 import { TurnCard, type FeedTurn } from "../views/Play";
 
 function streamOf(text: string, chunk = 7): ReadableStream<Uint8Array> {
@@ -70,7 +71,7 @@ const turn: FeedTurn = {
   key: "k",
   input: { text: "Has Oric been in?", channel: "say", to: [] },
   status: "done",
-  live: { speakers: [], narration: "", mechanics: [] },
+  live: { sentAt: 0, stages: [], calls: [], speakers: [], narration: "", mechanics: [] },
   result,
 };
 
@@ -89,7 +90,9 @@ describe("TurnCard", () => {
     expect(screen.getByText("Not for a week.")).toBeInTheDocument();
     expect(screen.getByText("whispers")).toBeInTheDocument();
     expect(screen.getAllByText("Has Oric been in?")).toHaveLength(1); // the bubble only
-    expect(container.querySelector(".roll")).toHaveTextContent("insight: 1d20 +2 = 14");
+    const die = container.querySelector("[data-testid=\"dice-roll\"]");
+    expect(die).toHaveTextContent("Insight");
+    expect(die).toHaveTextContent("= 14");
   });
 
   it("keeps developer material out of normal view", () => {
@@ -122,5 +125,67 @@ describe("TurnCard", () => {
     render(<TurnCard turn={t} names={names} dev={false} onAnswer={(a) => answers.push(a)} />);
     screen.getByRole("button", { name: "the second thief" }).click();
     expect(answers).toEqual(["the second thief"]);
+  });
+});
+
+
+describe("live turn state", () => {
+  it("folds stages and model calls into a timeline", () => {
+    let live = { sentAt: 0, stages: [], calls: [], speakers: [], narration: "", mechanics: [] } as FeedTurn["live"];
+    live = applyEvent(live, { name: "accepted", data: { turn_id: "t1" } }, 100);
+    live = applyEvent(live, { name: "stage", data: { stage: "interpreting", label: "Reading what you do" } }, 120);
+    live = applyEvent(live, { name: "model_call", data: { run_id: "r1", role: "intent_interpreter", phase: "started", max_tokens: 1024 } }, 130);
+    live = applyEvent(live, { name: "model_call", data: { run_id: "r1", role: "intent_interpreter", phase: "waiting", reason: "busy", wait_s: 5 } }, 140);
+    live = applyEvent(live, { name: "model_call", data: { run_id: "r1", role: "intent_interpreter", phase: "finished", status: "ok", completion_tokens: 210 } }, 9000);
+    expect(live.turnId).toBe("t1");
+    expect(live.stage?.label).toBe("Reading what you do");
+    expect(live.calls).toHaveLength(1);
+    expect(live.calls[0]).toMatchObject({ status: "ok", startedAt: 130, endedAt: 9000, completion_tokens: 210 });
+    expect(live.calls[0].notes[0]).toContain("busy");
+  });
+
+  it("restores failed and clarification turns from server history", () => {
+    const turns = fromServer([
+      { turn_id: "a", created_at: "", input: { text: "x", channel: "do", to: [] }, result: { error: { code: "ACTION_INVALID", message: "bad json" } } as never },
+      { turn_id: "b", created_at: "", input: { text: "y", channel: "do", to: [] }, result: { clarification: { clarification_id: "c", question: "Which?", candidates: [], original_input: "y" } } as never },
+    ]);
+    expect(turns[0]).toMatchObject({ status: "error", error: "ACTION_INVALID: bad json", turnId: "a" });
+    expect(turns[1].status).toBe("clarify");
+  });
+});
+
+
+describe("dice", () => {
+  it("shows the natural die, the total against the DC and the outcome", () => {
+    const roll = { id: "r1", expression: "1d20", raw: [13], natural: 13, modifier: 0, total: 21, purpose: "Persuasion", dc: 14, success: true, degree: "success", source: "engine" };
+    const t: FeedTurn = { ...turn, result: { ...result, visible_rolls: [roll] } };
+    const { container } = render(<TurnCard turn={t} names={names} selfId="alex" dev={false} onAnswer={() => {}} />);
+    const die = container.querySelector("[data-testid=\"dice-roll\"]");
+    expect(die).toHaveTextContent("13");
+    expect(die).toHaveTextContent("= 21 vs 14");
+    expect(die).toHaveTextContent("Success");
+    expect(screen.queryByText(/engine dice/)).toBeNull(); // the certificate is dev-only
+  });
+
+  it("asks for the roll with the check, the target and the stakes", () => {
+    const t: FeedTurn = {
+      ...turn,
+      result: {
+        ...result,
+        visible_rolls: [],
+        roll_request: {
+          id: "pr1",
+          prompt: "This calls for a Persuasion check",
+          checks: [{ label: "Persuasion", kind: "persuade", target_known_as: "Mira", die: "1d20", bonus: 5, dc: 14, attribute: "attr.presence", skill: "skill.persuasion", stakes: { success: "She helps.", failure: "She is wary.", retry: "Try another way." } }],
+        },
+      },
+    };
+    const decisions: string[] = [];
+    render(<TurnCard turn={t} names={names} selfId="alex" dev={false} onAnswer={() => {}} onRoll={(d) => decisions.push(d)} />);
+    expect(screen.getByText(/Persuasion check/)).toBeInTheDocument();
+    expect(screen.getByText("She is wary.")).toBeInTheDocument();
+    screen.getByRole("button", { name: "Roll" }).click();
+    screen.getByRole("button", { name: "Reconsider" }).click();
+    expect(decisions).toEqual(["roll", "reconsider"]);
   });
 });

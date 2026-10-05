@@ -22,7 +22,7 @@ test("a turn shows mechanics first, then labelled speech and narration", async (
   await say(page, "I look under the lantern on the tables.");
   const first = page.locator("article.turn").first();
   await expect(first.locator(".mechanics")).toContainText("search");
-  await expect(first.locator(".mechanics .roll")).toContainText("1d20");
+  await expect(first.getByTestId("dice-roll")).toContainText("Search");
   await expect(first.locator(".narration")).toContainText("Rain ticks on the shutters");
 
   await say(page, "Innkeeper, has Oric Dane been in lately?");
@@ -46,7 +46,7 @@ test("a whisper goes to the chosen listener and their reply is labelled", async 
   await openDemo(page);
   await page.getByRole("button", { name: "Whisper", exact: true }).click();
   await expect(page.getByRole("button", { name: "Send" })).toBeDisabled(); // no listener yet
-  await page.getByLabel("Whisper to").selectOption({ label: "Elara" });
+  await page.getByRole("group", { name: "Whisper to" }).getByRole("button", { name: "Elara", exact: true }).click();
   await say(page, "Just so you know, keep this between us: Mira knows more than she says.");
   const turn = page.locator("article.turn").last();
   await expect(turn.locator(".player-line")).toContainText("whisper → Elara");
@@ -90,4 +90,72 @@ test("normal view carries no hidden data; dev view adds traces and Debug", async
   await page.getByRole("switch", { name: /DEV/ }).click();
   await expect(page.getByRole("heading", { name: "Debug" })).toHaveCount(0);
   await expect(page.getByLabel("What do you do?")).toBeVisible();
+});
+
+test("a turn in flight keeps its status across views, and dev view shows each model call live", async ({ page }) => {
+  await openDemo(page);
+  await page.getByRole("switch", { name: /DEV/ }).click();
+  await page.getByLabel("What do you do?").fill("I look under the lantern on the tables.");
+  await page.getByRole("button", { name: "Send" }).click();
+  const turn = page.locator("article.turn").last();
+  // live, while the turn runs: a stage label with a clock, and the model calls as they happen
+  await expect(turn.getByRole("status")).toContainText("…");
+  const calls = turn.getByTestId("live-calls");
+  await expect(calls).toContainText("intent_interpreter");
+  await expect(calls).toContainText("request sent");
+  // leave and come back mid-turn: the turn is still there, and still running or finished
+  await page.getByRole("button", { name: "Character", exact: true }).first().click();
+  await page.getByRole("button", { name: "Play", exact: true }).first().click();
+  const again = page.locator("article.turn").last();
+  await expect(again.locator(".player-line")).toContainText("lantern");
+  await expect(again).toHaveAttribute("aria-busy", "false", { timeout: 30_000 });
+  await expect(again.locator(".narration")).toContainText("Rain ticks");
+  // what was sent opens from the trace of the finished turn
+  await again.getByRole("button", { name: "Trace" }).click();
+  await expect(again.getByTestId("trace")).toContainText("Model calls");
+});
+
+test("a called-for check waits for the player's roll, and dev view certifies the engine rolled", async ({ page }) => {
+  await openDemo(page);
+  await say(page, "Mira, let me in on it.");
+  const card = page.getByRole("region", { name: "A roll is called for" });
+  await expect(card).toContainText("Persuasion check");
+  await expect(card).toContainText("need 14");
+  await expect(card).toContainText("Failure");
+  // nothing has happened yet: no die has been rolled
+  await expect(page.getByTestId("dice-roll")).toHaveCount(0);
+  await page.getByRole("switch", { name: /DEV/ }).click();
+  await card.getByRole("button", { name: "Roll", exact: true }).click();
+  const die = page.getByTestId("dice-roll").last();
+  await expect(die).toContainText("vs 14", { timeout: 30_000 });
+  await expect(die).toContainText(/Success|Failure|Natural/);
+  await die.getByRole("button", { name: /engine dice/ }).click();
+  await expect(page.getByTestId("roll-certificate")).toContainText("the same dice");
+});
+
+test("reconsidering a called-for check changes nothing", async ({ page }) => {
+  await openDemo(page);
+  await say(page, "Mira, let me in on it.");
+  const card = page.getByRole("region", { name: "A roll is called for" });
+  await card.getByRole("button", { name: "Reconsider" }).click();
+  await expect(page.locator(".ooc-reply").last()).toContainText("You hold off");
+  await expect(page.getByTestId("dice-roll")).toHaveCount(0);
+});
+
+
+test("a whisper can go to several people, and speech can name who it is for", async ({ page }) => {
+  await openDemo(page);
+  await page.getByRole("button", { name: "Whisper", exact: true }).click();
+  const to = page.getByRole("group", { name: "Whisper to" });
+  await to.getByRole("button", { name: "Elara", exact: true }).click();
+  await to.getByRole("button", { name: "Tomas", exact: true }).click();
+  await say(page, "keep this between us: Mira knows more than she says.");
+  const t = page.locator("article.turn").last();
+  await expect(t.locator(".player-line")).toContainText(/whisper → (Elara, Tomas|Tomas, Elara)/);
+  await page.getByRole("button", { name: "Say", exact: true }).click();
+  await page.getByRole("group", { name: "Speak to" }).getByRole("button", { name: "Mira", exact: true }).click();
+  await say(page, "Innkeeper, has Oric Dane been in lately?");
+  const t2 = page.locator("article.turn").last();
+  await expect(t2.locator(".player-line")).toContainText("say → Mira");
+  await expect(t2.locator(".speech").filter({ hasText: "Not for a week" })).toBeVisible({ timeout: 30_000 });
 });
